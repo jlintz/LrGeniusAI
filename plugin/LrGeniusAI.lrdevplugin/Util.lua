@@ -3,6 +3,8 @@
 Util = {}
 
 local DEFAULT_PARTIAL_HASH_WINDOW_BYTES = 4 * 1024 * 1024
+local STABLE_ID_ALGO = "stable_meta_v1"
+local LEGACY_HASH_ALGO = "md5_partial"
 
 -- Utility function to check if table contains a value
 function Util.table_contains(tbl, x)
@@ -119,6 +121,64 @@ function Util.getDefaultPartialHashWindowBytes()
     return DEFAULT_PARTIAL_HASH_WINDOW_BYTES
 end
 
+local function safeGetRawMetadata(photo, key)
+    local ok, value = pcall(function()
+        return photo:getRawMetadata(key)
+    end)
+    if ok then return value end
+    return nil
+end
+
+local function safeGetFormattedMetadata(photo, key)
+    local ok, value = pcall(function()
+        return photo:getFormattedMetadata(key)
+    end)
+    if ok then return value end
+    return nil
+end
+
+function Util.computeStableMetadataPhotoId(photo)
+    if not photo then
+        return nil, "Photo is nil"
+    end
+
+    local fileName = safeGetFormattedMetadata(photo, "fileName") or ""
+    local dateTime = safeGetRawMetadata(photo, "dateTime") or ""
+    local width = safeGetRawMetadata(photo, "width") or ""
+    local height = safeGetRawMetadata(photo, "height") or ""
+    local fileFormat = safeGetRawMetadata(photo, "fileFormat") or ""
+    local cameraModel = safeGetFormattedMetadata(photo, "cameraModel") or ""
+    local lens = safeGetFormattedMetadata(photo, "lens") or ""
+    local focalLength = safeGetFormattedMetadata(photo, "focalLength") or ""
+    local aperture = safeGetFormattedMetadata(photo, "aperture") or ""
+    local shutterSpeed = safeGetFormattedMetadata(photo, "shutterSpeed") or ""
+    local isoSpeed = safeGetFormattedMetadata(photo, "isoSpeedRating") or ""
+
+    local payload = table.concat({
+        tostring(fileName),
+        tostring(dateTime),
+        tostring(width),
+        tostring(height),
+        tostring(fileFormat),
+        tostring(cameraModel),
+        tostring(lens),
+        tostring(focalLength),
+        tostring(aperture),
+        tostring(shutterSpeed),
+        tostring(isoSpeed),
+    }, "|")
+
+    if Util.nilOrEmpty(payload) or payload == string.rep("|", 10) then
+        return nil, "Insufficient metadata for stable photo ID"
+    end
+
+    local digest = LrMD5.digest(payload)
+    if Util.nilOrEmpty(digest) then
+        return nil, "Stable metadata digest failed"
+    end
+    return "meta1:" .. digest, nil
+end
+
 local function getFileAttributes(filePath)
     if Util.nilOrEmpty(filePath) then
         return nil, "File path missing"
@@ -148,14 +208,17 @@ function Util.computePartialFileMd5(filePath, windowBytes)
         return nil, "LrMD5.digest is unavailable"
     end
 
+    local startedAt = LrDate.currentTime()
     local attributes, attrErr = getFileAttributes(filePath)
     if not attributes then
+        log:error("computePartialFileMd5: file attribute error for " .. tostring(filePath) .. ": " .. tostring(attrErr))
         return nil, attrErr
     end
 
     local chunkSize = math.max(1, tonumber(windowBytes) or DEFAULT_PARTIAL_HASH_WINDOW_BYTES)
     local fh = io.open(filePath, "rb")
     if not fh then
+        log:error("computePartialFileMd5: could not open file for binary read: " .. tostring(filePath))
         return nil, "Could not open file for binary read"
     end
 
@@ -173,8 +236,19 @@ function Util.computePartialFileMd5(filePath, windowBytes)
     local md5Input = tostring(attributes.fileSize) .. ":" .. firstChunk .. ":" .. lastChunk
     local digest = LrMD5.digest(md5Input)
     if Util.nilOrEmpty(digest) then
+        log:error("computePartialFileMd5: digest failed for " .. tostring(filePath))
         return nil, "MD5 digest failed"
     end
+
+    local elapsedMs = math.floor((LrDate.currentTime() - startedAt) * 1000)
+    log:trace(
+        "computePartialFileMd5: file=" .. tostring(filePath) ..
+        " size=" .. tostring(attributes.fileSize) ..
+        " chunkSize=" .. tostring(chunkSize) ..
+        " firstLen=" .. tostring(firstLen) ..
+        " lastLen=" .. tostring(string.len(lastChunk)) ..
+        " elapsedMs=" .. tostring(elapsedMs)
+    )
 
     return digest, {
         fileSize = attributes.fileSize,
@@ -208,35 +282,65 @@ function Util.getGlobalPhotoIdForPhoto(photo, options)
     local originalFilePath = photo:getRawMetadata("path")
     local attributes, attrErr = getFileAttributes(originalFilePath)
     if not attributes then
+        log:error("getGlobalPhotoIdForPhoto: file attributes unavailable for photo path=" .. tostring(originalFilePath) .. " err=" .. tostring(attrErr))
         return nil, attrErr
     end
 
     local cachedId = photo:getPropertyForPlugin(_PLUGIN, "globalPhotoId")
+    local cachedAlgorithm = photo:getPropertyForPlugin(_PLUGIN, "globalPhotoIdAlgorithm")
     local cachedSize = tonumber(photo:getPropertyForPlugin(_PLUGIN, "globalPhotoIdFileSize") or "")
     local cachedMtime = tonumber(photo:getPropertyForPlugin(_PLUGIN, "globalPhotoIdFileModificationDate") or "")
 
-    if not options.forceRecompute and not Util.nilOrEmpty(cachedId)
-        and cachedSize == attributes.fileSize
-        and cachedMtime == attributes.fileModificationDate then
-        return cachedId, nil
+    if not options.forceRecompute and not Util.nilOrEmpty(cachedId) then
+        if cachedAlgorithm == STABLE_ID_ALGO then
+            log:trace("getGlobalPhotoIdForPhoto: cache hit for " .. tostring(originalFilePath))
+            return cachedId, nil
+        end
+        if cachedAlgorithm == LEGACY_HASH_ALGO
+            and cachedSize == tonumber(attributes.fileSize)
+            and math.floor(cachedMtime or 0) == math.floor(tonumber(attributes.fileModificationDate) or 0) then
+            log:trace("getGlobalPhotoIdForPhoto: cache hit for legacy hash " .. tostring(originalFilePath))
+            return cachedId, nil
+        end
     end
 
-    local globalPhotoId, metadataOrErr = Util.buildGlobalPhotoId(originalFilePath, options.windowBytes)
+    local rebuildStartedAt = LrDate.currentTime()
+    local globalPhotoId, idErr = Util.computeStableMetadataPhotoId(photo)
+    local metadata = {
+        fileSize = attributes.fileSize,
+        fileModificationDate = attributes.fileModificationDate,
+        algorithm = STABLE_ID_ALGO,
+    }
+
     if not globalPhotoId then
-        return nil, metadataOrErr
+        log:warn("getGlobalPhotoIdForPhoto: stable metadata id failed, falling back to partial hash for " .. tostring(originalFilePath) .. " err=" .. tostring(idErr))
+        local fallbackId, metadataOrErr = Util.buildGlobalPhotoId(originalFilePath, options.windowBytes)
+        if not fallbackId then
+            log:error("getGlobalPhotoIdForPhoto: failed for " .. tostring(originalFilePath) .. " err=" .. tostring(metadataOrErr))
+            return nil, metadataOrErr
+        end
+        if type(metadataOrErr) ~= "table" then
+            return nil, "Invalid photo metadata"
+        end
+        globalPhotoId = fallbackId
+        metadata = metadataOrErr
+        metadata.algorithm = LEGACY_HASH_ALGO
     end
 
-    if type(metadataOrErr) ~= "table" then
-        return nil, "Invalid photo metadata"
-    end
-    local metadata = metadataOrErr
     local catalog = LrApplication.activeCatalog()
     catalog:withPrivateWriteAccessDo(function()
         photo:setPropertyForPlugin(_PLUGIN, "globalPhotoId", globalPhotoId)
-        photo:setPropertyForPlugin(_PLUGIN, "globalPhotoIdFileSize", metadata.fileSize)
-        photo:setPropertyForPlugin(_PLUGIN, "globalPhotoIdFileModificationDate", metadata.fileModificationDate)
-        photo:setPropertyForPlugin(_PLUGIN, "globalPhotoIdAlgorithm", "md5_partial")
+        photo:setPropertyForPlugin(_PLUGIN, "globalPhotoIdFileSize", tostring(metadata.fileSize or ""))
+        photo:setPropertyForPlugin(_PLUGIN, "globalPhotoIdFileModificationDate", tostring(metadata.fileModificationDate or ""))
+        photo:setPropertyForPlugin(_PLUGIN, "globalPhotoIdAlgorithm", tostring(metadata.algorithm or STABLE_ID_ALGO))
     end)
+
+    local rebuildElapsedMs = math.floor((LrDate.currentTime() - rebuildStartedAt) * 1000)
+    log:trace(
+        "getGlobalPhotoIdForPhoto: cache miss -> generated id for " .. tostring(originalFilePath) ..
+        " elapsedMs=" .. tostring(rebuildElapsedMs) ..
+        " idPrefix=" .. tostring(string.sub(globalPhotoId, 1, 24))
+    )
 
     return globalPhotoId, nil
 end
