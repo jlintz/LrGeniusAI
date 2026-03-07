@@ -1,3 +1,7 @@
+# Plugin README
+
+> Auto-generated from `plugin/README.md`. Do not edit this page manually.
+
 # LrGeniusAI Lightroom Plugin
 
 AI-powered metadata, semantic search, quality scoring, and face workflows for Adobe Lightroom Classic.
