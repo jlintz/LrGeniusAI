@@ -48,6 +48,14 @@ Returns aggregated counters for the current backend database, including:
 
 Creates and returns a ZIP backup of the persistent backend data directory. This includes the Chroma data as well as accompanying JSON and SQLite files stored under the configured DB path.
 
+Recommended use cases:
+
+- before one-time DB migrations
+- before moving or rebuilding the backend host
+- before larger maintenance work on the server
+
+The ZIP is created temporarily on the server for download and removed again after the response is sent.
+
 ### Lightroom plugin integration
 
 In `Plug-in Manager -> LrGeniusAI -> Backend Server`, the button `Download DB backup` downloads this ZIP from the backend and reveals the saved file in Finder or Explorer.
