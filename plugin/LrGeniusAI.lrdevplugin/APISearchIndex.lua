@@ -40,7 +40,7 @@ local ENDPOINTS = {
     FACES_PERSON_PHOTOS = "/faces/persons",  -- suffix /<id>/photos
     FACES_DETECT = "/faces/detect",
     FACES_QUERY = "/faces/query",
-    MIGRATE_PHOTO_IDS = "/database/migrate-photo-ids",
+    MIGRATE_PHOTO_IDS = "/db/migrate-photo-ids",
     DB_BACKUP = "/db/backup",
 }
 
