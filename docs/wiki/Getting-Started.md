@@ -38,7 +38,18 @@ If you upgraded from an older release with UUID-based backend IDs:
 
 This is a one-time step.
 
-## 5. Vertex AI login
+## 5. Create a DB backup
+
+Before migrations, server moves, or larger backend maintenance, create a backup from Lightroom:
+
+1. Open `File -> Plug-in Manager`
+2. Open LrGeniusAI settings
+3. In `Backend Server`, click `Download DB backup`
+4. Save the generated `.zip` file to a safe location
+
+The backup contains the full persistent backend DB directory, including Chroma data as well as SQLite and JSON files.
+
+## 6. Vertex AI login
 
 Use gcloud ADC on the server host:
 
@@ -51,7 +62,6 @@ gcloud auth application-default login
 If the backend runs in Docker Compose on a remote server, run the login inside the container instead:
 
 ```bash
-cd server
 mkdir -p gcloud
 docker compose up -d --build
 docker compose exec geniusai-server gcloud config set project YOUR_PROJECT_ID
@@ -66,7 +76,7 @@ docker compose exec geniusai-server gcloud auth application-default login --no-b
 
 The bind mount `./gcloud:/root/.config/gcloud` keeps ADC and the active gcloud project persistent across container restarts and rebuilds.
 
-## 6. Imported help pages
+## 7. Imported help pages
 
 Curated pages migrated from `lrgenius.com/help`:
 

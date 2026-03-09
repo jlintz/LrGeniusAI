@@ -1,12 +1,9 @@
 from flask import Blueprint, jsonify, request
-import json
-import os
 
 import server_lifecycle
-from config import logger, DB_PATH
+from config import logger
 from service_metadata import get_analysis_service
-import service_chroma as chroma_service
-import service_persons as persons_service
+import service_version
 
 server_bp = Blueprint('server', __name__)
 
@@ -14,41 +11,6 @@ server_bp = Blueprint('server', __name__)
 def ping():
     #logger.info("Ping request received")
     return "pong"
-
-
-@server_bp.route('/stats', methods=['GET'])
-@server_bp.route('/database/stats', methods=['GET'])
-def database_stats():
-    """
-    Return database statistics: indexed photos, faces, persons, and metadata/embedding counts.
-
-    Returns: {
-        "photos": { "total", "with_embedding", "with_title", "with_caption", "with_keywords", "with_quality_score" },
-        "faces": { "total" },
-        "persons": { "total" }
-    }
-    """
-    try:
-        image_stats = chroma_service.get_image_metadata_stats()
-        face_count = chroma_service.get_face_count()
-        persons = persons_service.list_persons()
-        person_count = len(persons)
-
-        return jsonify({
-            "photos": {
-                "total": image_stats["total"],
-                "with_embedding": image_stats["with_embedding"],
-                "with_title": image_stats["with_title"],
-                "with_caption": image_stats["with_caption"],
-                "with_keywords": image_stats["with_keywords"],
-                "with_quality_score": image_stats["with_quality_score"],
-            },
-            "faces": {"total": face_count},
-            "persons": {"total": person_count},
-        })
-    except Exception as e:
-        logger.error(f"Error computing database stats: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
 
 
 @server_bp.route('/shutdown', methods=['POST'])
@@ -109,55 +71,22 @@ def list_models():
         return jsonify({"error": str(e)}), 500
 
 
-@server_bp.route('/database/migrate-photo-ids', methods=['POST'])
-def migrate_photo_ids():
-    """Migrate existing Chroma IDs from legacy uuid to new photo_id.
+@server_bp.route('/version', methods=['GET'])
+def version():
+    return jsonify(service_version.get_backend_version_info())
 
-    Body:
-      {
-        "mappings": [{"old_id":"...", "new_id":"..."}],
-        "overwrite": false,
-        "dry_run": false,
-        "update_faces": true,
-        "update_vertex": true
-      }
-    Alternative:
-      {
-        "mapping_file": "relative/or/absolute/path.json"
-      }
-    """
+
+@server_bp.route('/version/check', methods=['POST'])
+def version_check():
     data = request.get_json(silent=True) or {}
-    mappings = data.get("mappings")
+    plugin_version = data.get("plugin_version")
+    plugin_release_tag = data.get("plugin_release_tag")
+    plugin_build = data.get("plugin_build")
 
-    if mappings is None and data.get("mapping_file"):
-        file_path = data["mapping_file"]
-        if not os.path.isabs(file_path):
-            file_path = os.path.join(DB_PATH, file_path)
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-            mappings = payload.get("mappings", payload)
-        except Exception as e:
-            return jsonify({"error": f"Could not read mapping_file: {e}"}), 400
-
-    if not isinstance(mappings, list):
-        return jsonify({"error": "mappings must be a list"}), 400
-
-    logger.info(
-        "Received photo_id migration request: mappings=%s overwrite=%s dry_run=%s update_faces=%s update_vertex=%s mapping_file=%s",
-        len(mappings),
-        bool(data.get("overwrite", False)),
-        bool(data.get("dry_run", False)),
-        bool(data.get("update_faces", True)),
-        bool(data.get("update_vertex", True)),
-        data.get("mapping_file"),
+    result = service_version.check_plugin_backend_version(
+        plugin_version=plugin_version,
+        plugin_build=plugin_build,
+        plugin_release_tag=plugin_release_tag,
     )
-    summary = chroma_service.migrate_photo_ids(
-        mappings,
-        update_faces=bool(data.get("update_faces", True)),
-        update_vertex=bool(data.get("update_vertex", True)),
-        overwrite=bool(data.get("overwrite", False)),
-        dry_run=bool(data.get("dry_run", False)),
-    )
-    logger.info("Completed photo_id migration request: %s", summary)
-    return jsonify({"status": "ok", "summary": summary}), 200
+    return jsonify(result), 200
+

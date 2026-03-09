@@ -22,6 +22,7 @@ function PluginInfoDialogSections.startDialog(propertyTable)
 
     propertyTable.exportSize = prefs.exportSize
     propertyTable.exportQuality = prefs.exportQuality
+    propertyTable.usePreviewThumbnails = (prefs.usePreviewThumbnails ~= false)
 
     propertyTable.promptTitles = {}
     for title, prompt in pairs(prefs.prompts) do
@@ -236,6 +237,21 @@ function PluginInfoDialogSections.sectionsForTopOfDialog(f, propertyTable)
                 },
                 f:row {
                     f:push_button {
+                        title = "Generate hash-based photo IDs (catalog only)",
+                        action = function(button)
+                            LrTasks.startAsyncTask(function()
+                                local ok, msg = SearchIndexAPI.generateGlobalPhotoIdsForCatalog()
+                                if ok then
+                                    LrDialogs.message("Photo-ID Generation", msg or "Generation completed.")
+                                else
+                                    LrDialogs.message("Photo-ID Generation failed", msg or "Unknown error", "critical")
+                                end
+                            end)
+                        end,
+                    },
+                },
+                f:row {
+                    f:push_button {
                         title = "Migrate existing DB IDs to photo_id",
                         action = function(button)
                             LrTasks.startAsyncTask(function()
@@ -256,6 +272,69 @@ function PluginInfoDialogSections.sectionsForTopOfDialog(f, propertyTable)
                                     LrDialogs.message("Photo-ID Migration", msg or "Migration completed.")
                                 else
                                     LrDialogs.message("Photo-ID Migration failed", msg or "Unknown error", "critical")
+                                end
+                            end)
+                        end,
+                    },
+                    f:push_button {
+                        title = "Check Plugin/Backend versions",
+                        action = function(button)
+                            LrTasks.startAsyncTask(function()
+                                local result, err = SearchIndexAPI.checkVersionCompatibility()
+                                if result then
+                                    local backendTag = tostring(result.backend_release_tag or ("v" .. tostring(result.backend_version or "unknown")))
+                                    local pluginTag = tostring(result.plugin_release_tag or ("v" .. tostring(result.plugin_version or "unknown")))
+                                    local buildInfo = "Plugin build: " .. tostring(result.plugin_build or "n/a") ..
+                                        "\nBackend build: " .. tostring(result.backend_build or "n/a")
+
+                                    if result.compatible then
+                                        LrDialogs.message(
+                                            "Version check passed",
+                                            "Plugin and backend versions match.\n" ..
+                                            "Plugin: " .. pluginTag .. "\n" ..
+                                            "Backend: " .. backendTag .. "\n\n" ..
+                                            buildInfo
+                                        )
+                                    else
+                                        LrDialogs.message(
+                                            "Version mismatch",
+                                            "Plugin and backend versions differ.\n" ..
+                                            "Plugin: " .. pluginTag .. "\n" ..
+                                            "Backend: " .. backendTag .. "\n" ..
+                                            "Reason: " .. tostring(result.reason or "unknown") .. "\n\n" ..
+                                            buildInfo,
+                                            "warning"
+                                        )
+                                    end
+                                else
+                                    LrDialogs.message("Version check failed", tostring(err or "Unknown error"), "critical")
+                                end
+                            end)
+                        end,
+                    },
+                    f:push_button {
+                        title = "Download DB backup",
+                        action = function(button)
+                            LrTasks.startAsyncTask(function()
+                                local result, path = SearchIndexAPI.downloadDatabaseBackup()
+                                if result then
+                                    LrShell.revealInShell(path)
+                                    LrDialogs.message("Database backup downloaded.", path)
+                                else
+                                    LrDialogs.message("Database backup failed", tostring(result or "Unknown error"), "critical")
+                                end
+                            end)
+                        end,
+                    },
+                    f:push_button {
+                        title = "Show DB stats",
+                        action = function(button)
+                            LrTasks.startAsyncTask(function()
+                                local stats, err = SearchIndexAPI.getStats()
+                                if stats then
+                                    LrDialogs.message("Database statistics", SearchIndexAPI.formatStats(stats), "info")
+                                else
+                                    LrDialogs.message("Database statistics failed", tostring(err or "Unknown error"), "critical")
                                 end
                             end)
                         end,
@@ -359,6 +438,14 @@ function PluginInfoDialogSections.sectionsForTopOfDialog(f, propertyTable)
                         title = bind 'exportQuality'
                     },
                 },
+                f:row {
+                    f:checkbox {
+                        value = bind 'usePreviewThumbnails',
+                    },
+                    f:static_text {
+                        title = LOC "$$$/LrGeniusAI/PluginInfo/UsePreviewThumbnails=Use Lightroom previews for faster indexing",
+                    },
+                },
             },
             f:group_box {
                 width = share 'groupBoxWidth',
@@ -399,6 +486,7 @@ function PluginInfoDialogSections.endDialog(propertyTable)
     prefs.vertexLocation = (propertyTable.vertexLocation and propertyTable.vertexLocation:gsub("^%s*(.-)%s*$", "%1")) or "us-central1"
     prefs.exportSize = propertyTable.exportSize
     prefs.exportQuality = propertyTable.exportQuality
+    prefs.usePreviewThumbnails = (propertyTable.usePreviewThumbnails ~= false)
 
     prefs.prompt = propertyTable.prompt
     prefs.prompts = propertyTable.prompts

@@ -1,5 +1,5 @@
 -- TaskAnalyzeAndIndex.lua
--- Unified task for analyzing photos with AI (metadata + quality scores) and indexing them.
+-- Unified task for analyzing photos with AI metadata and indexing them.
 -- Combines the old TaskAnalyzeImage and TaskManageIndex into one streamlined workflow.
 
 
@@ -27,7 +27,6 @@ local function showAnalyzeAndIndexDialog(ctx)
     props.enableFaces = prefs.enableFaces or false
     props.enableVertexAI = prefs.enableVertexAI or false
     props.enableImportBeforeIndex = prefs.enableImportBeforeIndex or false
-    props.enableQuality = false 
     props.regenerateMetadata = prefs.regenerateMetadata or false
     
     -- Metadata generation options
@@ -419,7 +418,6 @@ local function showAnalyzeAndIndexDialog(ctx)
         prefs.enableMetadata = props.enableMetadata
         prefs.enableFaces = props.enableFaces
         prefs.enableVertexAI = props.enableVertexAI
-        prefs.enableQuality = props.enableQuality
         prefs.enableImportBeforeIndex = props.enableImportBeforeIndex
         prefs.regenerateMetadata = props.regenerateMetadata
         prefs.generateKeywords = props.generateKeywords
@@ -554,7 +552,7 @@ LrTasks.startAsyncTask(function()
         if not props then return end
 
         -- Validate that at least one task is selected
-        if not props.enableEmbeddings and not props.enableMetadata and not props.enableQuality and not props.enableFaces and not props.enableVertexAI then
+        if not props.enableEmbeddings and not props.enableMetadata and not props.enableFaces and not props.enableVertexAI then
             LrDialogs.showError(LOC "$$$/LrGeniusAI/AnalyzeAndIndex/NoTasksSelected=Please select at least one task to perform.")
             return
         end
@@ -563,7 +561,6 @@ LrTasks.startAsyncTask(function()
         local tasks = {}
         if props.enableEmbeddings then table.insert(tasks, "embeddings") end
         if props.enableMetadata then table.insert(tasks, "metadata") end
-        if props.enableQuality then table.insert(tasks, "quality") end
         if props.enableFaces then table.insert(tasks, "faces") end
         if props.enableVertexAI then table.insert(tasks, "vertexai") end
 
@@ -597,7 +594,6 @@ LrTasks.startAsyncTask(function()
             submit_user_context = props.showPhotoContextDialog,
             submit_date_time = props.submitDateTime,
             enableMetadata = props.enableMetadata,
-            enableQuality = props.enableQuality,
             enableFaces = props.enableFaces,
             enableVertexAI = props.enableVertexAI,
             replace_ss = props.replaceSS,
@@ -654,14 +650,26 @@ LrTasks.startAsyncTask(function()
         local taskOptionsForScope = (props.scope == "missing") and {
             enableEmbeddings = props.enableEmbeddings,
             enableMetadata = props.enableMetadata,
-            enableQuality = props.enableQuality,
             enableFaces = props.enableFaces,
             enableVertexAI = props.enableVertexAI,
             regenerateMetadata = props.regenerateMetadata
         } or nil
-        local photosToProcess, errorStatus = PhotoSelector.getPhotosInScope(props.scope, taskOptionsForScope)
+
+        local lookupProgressScope
+        if props.scope == "missing" then
+            lookupProgressScope = LrProgressScope({
+                title = LOC "$$$/LrGeniusAI/AnalyzeAndIndex/LookupTitle=Looking up which photos need processing...",
+                functionContext = context,
+                parent = progressScope,
+            })
+        end
+        local photosToProcess, errorStatus = PhotoSelector.getPhotosInScope(props.scope, taskOptionsForScope, lookupProgressScope)
+        if lookupProgressScope then
+            lookupProgressScope:done()
+        end
 
         if photosToProcess == nil or type(photosToProcess) ~= 'table' or #photosToProcess == 0 then
+            progressScope:done()
             if errorStatus == "Invalid view" then
                 LrDialogs.message(
                     LOC "$$$/LrGeniusAI/common/InvalidViewTitle=Invalid View",
@@ -675,6 +683,13 @@ LrTasks.startAsyncTask(function()
                 )
             end
             return
+        end
+
+        -- Update main progress with photo count (counter)
+        progressScope:setCaption(LOC("$$$/LrGeniusAI/AnalyzeAndIndex/ProgressCount=^1 photos to process", tostring(#photosToProcess)))
+        -- Reset progress portion after delta lookup so subsequent phases (import, processing) start from 0
+        if props.scope == "missing" then
+            progressScope:setPortionComplete(0, 1)
         end
 
         -- If photo context dialog is enabled, show it for each photo
@@ -720,7 +735,7 @@ LrTasks.startAsyncTask(function()
         
         status, processed, failed, processedPhotos = SearchIndexAPI.analyzeAndIndexSelectedPhotos(photosToProcess, processingProgressScope, options)
 
-        if status ~= "allfailed" and (props.enableMetadata or props.enableQuality) and props.saveDataToCatalog then
+        if status ~= "allfailed" and props.enableMetadata and props.saveDataToCatalog then
             log:trace("Saving metadata for processed photos...")
             local savedCount = 0
             local skippedCount = 0
@@ -745,7 +760,6 @@ LrTasks.startAsyncTask(function()
                                 applyTitle = props.generateTitle,
                                 applyCaption = props.generateCaption,
                                 applyAltText = props.generateAltText,
-                                applyQuality = props.enableQuality,
                             })
 
                             if validatedData ~= nil and validatedData.skipFromHere then
@@ -763,7 +777,6 @@ LrTasks.startAsyncTask(function()
                                 applyTitle = props.generateTitle,
                                 applyCaption = props.generateCaption,
                                 applyAltText = props.generateAltText,
-                                applyQuality = props.enableQuality,
                                 useTopLevelKeyword = props.useTopLevelKeyword,
                                 topLevelKeyword = props.topLevelKeyword,
                             })
@@ -786,7 +799,6 @@ LrTasks.startAsyncTask(function()
                             applyTitle = props.generateTitle,
                             applyCaption = props.generateCaption,
                             applyAltText = props.generateAltText,
-                            applyQuality = props.enableQuality,
                             useTopLevelKeyword = props.useTopLevelKeyword,
                             topLevelKeyword = props.topLevelKeyword,
                         })

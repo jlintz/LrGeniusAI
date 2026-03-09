@@ -14,11 +14,12 @@ end
 ---
 -- @param scope string 'selected'|'view'|'all'|'missing'
 -- @param taskOptions table|boolean|nil For scope 'missing': task options table
---   { enableEmbeddings, enableMetadata, enableQuality, enableFaces, regenerateMetadata }
+--   { enableEmbeddings, enableMetadata, enableFaces, regenerateMetadata }
 --   to check backend for unprocessed photos. Or boolean for legacy (requireEmbeddings).
 --   Nil/omitted = legacy true (photos not in index with embeddings).
+-- @param lookupProgressScope LrProgressScope|nil For scope 'missing': optional progress for lookup phase.
 --
-function PhotoSelector.getPhotosInScope(scope, taskOptions)
+function PhotoSelector.getPhotosInScope(scope, taskOptions, lookupProgressScope)
     local catalog = LrApplication.activeCatalog()
     local photosToProcess = {}
     local status = "ok"
@@ -77,7 +78,7 @@ function PhotoSelector.getPhotosInScope(scope, taskOptions)
         photosToProcess = filterPhotos(catalog:getAllPhotos())
     elseif scope == "missing" then
         local success = false
-        success, photosToProcess = SearchIndexAPI.getMissingPhotosFromIndex(taskOptions)
+        success, photosToProcess = SearchIndexAPI.getMissingPhotosFromIndex(taskOptions, lookupProgressScope)
         status = success and "ok" or "indexerror"
     end
 
