@@ -29,6 +29,39 @@ The server is built with **Python** and designed to run as a local background pr
 
 ---
 
+## 🗄️ Database API
+
+The backend exposes dedicated database endpoints for status and backup operations.
+
+### `GET /db/stats`
+
+Returns aggregated counters for the current backend database, including:
+
+- total indexed photos
+- photos with SigLIP embeddings
+- photos with title / caption / keywords
+- photos with Vertex AI embeddings
+- total indexed faces
+- total detected persons
+
+### `GET /db/backup`
+
+Creates and returns a ZIP backup of the persistent backend data directory. This includes the Chroma data as well as accompanying JSON and SQLite files stored under the configured DB path.
+
+Recommended use cases:
+
+- before one-time DB migrations
+- before moving or rebuilding the backend host
+- before larger maintenance work on the server
+
+The ZIP is created temporarily on the server for download and removed again after the response is sent.
+
+### Lightroom plugin integration
+
+In `Plug-in Manager -> LrGeniusAI -> Backend Server`, the button `Download DB backup` downloads this ZIP from the backend and reveals the saved file in Finder or Explorer.
+
+---
+
 ## ☁️ Persistent Vertex AI Login In Docker Compose
 
 If you run the backend remotely via Docker Compose, authenticate inside the container so Vertex AI uses Application Default Credentials (ADC) from the same runtime that executes the Python code.
@@ -38,7 +71,6 @@ The Compose file mounts `./gcloud` to `/root/.config/gcloud`, which keeps the ac
 ### Recommended setup
 
 ```bash
-cd server
 mkdir -p gcloud
 docker compose up -d --build
 docker compose exec geniusai-server gcloud config set project YOUR_PROJECT_ID
@@ -64,6 +96,55 @@ Then complete the remote bootstrap flow on a second trusted machine with a brows
 
 ---
 
+## 🧹 Automatic Housekeeping (Faces & Backups)
+
+When running the backend in Docker (or any long‑lived environment), you can enable optional background housekeeping tasks using environment variables.
+
+### Periodic face clustering
+
+The server can automatically re‑cluster face embeddings in the background, using the same logic as the `POST /faces/cluster` endpoint:
+
+- `GENIUSAI_FACES_CLUSTER_ENABLED`  
+  - `true` / `1` / `yes` / `on` to enable.  
+  - Default: disabled.
+- `GENIUSAI_FACES_CLUSTER_INTERVAL`  
+  - Interval in seconds between clustering runs.  
+  - Default: `3600` (1 hour). Minimum effective interval is 60 seconds.
+- `GENIUSAI_FACES_CLUSTER_DISTANCE`  
+  - Cosine distance threshold, same scale as Immich “Maximum recognition distance”.  
+  - Typical range: `0.45–0.65`. Default: `0.5`.
+- `GENIUSAI_FACES_CLUSTER_MIN_FACES`  
+  - Minimum number of faces required to form a person cluster (DBSCAN mode).  
+  - Example: `3` (singletons go to `person_unassigned`).  
+  - If unset/empty, every face is assigned to a cluster (Agglomerative mode).
+- `GENIUSAI_FACES_CLUSTER_LINKAGE`  
+  - `"complete"` (default) = tighter clusters, fewer false merges.  
+  - `"average"` = more merging.
+
+These runs happen entirely in the backend process and do not require Lightroom to be open.
+
+### Periodic database backups
+
+The backend can also create periodic ZIP backups of the database directory and prune older backups automatically:
+
+- `GENIUSAI_BACKUP_ENABLED`  
+  - `true` / `1` / `yes` / `on` to enable.  
+  - Default: disabled.
+- `GENIUSAI_BACKUP_INTERVAL`  
+  - Interval in seconds between backup runs.  
+  - Default: `86400` (once per day). Minimum is 600 seconds.
+- `GENIUSAI_BACKUP_MAX_KEEP`  
+  - Number of newest backup ZIPs to keep under `<db-path>/backups`.  
+  - Default: `14`. Values ≤ 0 are treated as `1`.
+
+Each run:
+
+1. Calls the same backup logic used by `GET /db/backup` to create a ZIP of the DB path.
+2. Stores a persistent copy under `<db-path>/backups`.
+3. Deletes older ZIPs so that only the newest `GENIUSAI_BACKUP_MAX_KEEP` remain.
+
+---
+
 ## ⚠️ Breaking Change: `photo_id` Migration
 
 The server switched primary IDs from legacy Lightroom UUIDs to file-based `photo_id` values.
@@ -75,7 +156,7 @@ If you run an existing database, perform a one-time migration.
 - Trigger from Lightroom plugin UI:
   - `File -> Plug-in Manager -> LrGeniusAI -> Backend Server -> Migrate existing DB IDs to photo_id`
 - Trigger via API:
-  - `POST /database/migrate-photo-ids`
+  - `POST /db/migrate-photo-ids`
   - Body: `{ "mappings": [{ "old_id": "...", "new_id": "..." }] }`
 - Trigger on server startup:
   - Set `GENIUSAI_MIGRATION_FILE` to a JSON mapping file path

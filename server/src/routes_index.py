@@ -65,13 +65,18 @@ def _extract_options(data):
 
     options['replace_ss'] = str(data.get('replace_ss', 'false')).lower() == 'true'
     options['ollama_base_url'] = data.get('ollama_base_url') or None  # Optional: use custom Ollama host
+    options['lmstudio_base_url'] = data.get('lmstudio_base_url') or None  # Optional: use custom LM Studio host
     # Support both snake_case and camelCase keys from clients
     reg_val = data.get('regenerate_metadata')
     if reg_val is None:
         reg_val = data.get('regenerateMetadata', 'true')
     options['regenerate_metadata'] = str(reg_val).lower() == 'true'
     options['prompt'] = data.get('prompt')
+    # Optional capture time from Lightroom catalog.
+    # `date_time_unix` is a float seconds-since-epoch value; `date_time` is an
+    # ISO/W3C string kept for backwards compatibility.
     options['date_time'] = data.get('date_time')
+    options['date_time_unix'] = data.get('date_time_unix')
 
     tasks_raw = data.get('tasks')
     if tasks_raw:
@@ -83,11 +88,10 @@ def _extract_options(data):
         else:
             tasks = tasks_raw
     else:
-        tasks = ['embeddings', 'quality'] # Default tasks
+        tasks = ['embeddings'] # Default tasks
 
     options['compute_embeddings'] = 'embeddings' in tasks
     options['compute_metadata'] = 'metadata' in tasks
-    options['compute_quality'] = 'quality' in tasks
     options['compute_faces'] = 'faces' in tasks
     options['compute_vertexai'] = 'vertexai' in tasks
 
@@ -295,7 +299,7 @@ def remove_image():
 @index_bp.route('/get', methods=['POST'])
 def get_photo_data():
     """
-    Retrieves metadata and quality scores for a photo by photo_id.
+    Retrieves stored metadata for a photo by photo_id.
     
     JSON body parameters:
     - photo_id (string): The ID of the photo to retrieve
@@ -304,7 +308,6 @@ def get_photo_data():
     - status: "success" or "error"
     - photo_id: The photo ID
     - metadata: Dictionary with all metadata fields (title, caption, keywords, etc.)
-    - quality: Dictionary with quality scores (overall_score, composition_score, etc.)
     """
     logger.info("Get photo data request received")
     
@@ -325,15 +328,8 @@ def get_photo_data():
         # Extract metadata
         metadata_dict = photo_data['metadatas'][0] if photo_data['metadatas'] else {}
         
-        # Separate metadata into user-facing metadata and quality scores
+        # Separate user-facing metadata from internal indexing fields
         metadata_fields = {}
-        quality_fields = {}
-        
-        # Quality score field names
-        quality_keys = {
-            'overall_score', 'composition_score', 'lighting_score', 
-            'motiv_score', 'colors_score', 'emotion_score', 'quality_critique'
-        }
         
         # User metadata field names (from metadata generation)
         metadata_keys = {
@@ -344,9 +340,7 @@ def get_photo_data():
         ai_rundate = metadata_dict.get('run_date')
 
         for key, value in metadata_dict.items():
-            if key in quality_keys:
-                quality_fields[key] = value
-            elif key in metadata_keys:
+            if key in metadata_keys:
                 logger.info(f"Processing metadata field {key}: {value}")
                 # Keywords must be returned as JSON string (not parsed) for plugin to handle
                 if key == 'keywords' and isinstance(value, str) and value:
@@ -364,14 +358,13 @@ def get_photo_data():
                 else:
                     metadata_fields[key] = value
         
-        logger.info(f"Retrieved data for photo {photo_id}: {len(metadata_fields)} metadata fields, {len(quality_fields)} quality fields")
+        logger.info(f"Retrieved data for photo {photo_id}: {len(metadata_fields)} metadata fields")
         
         return jsonify({
             "status": "success",
             "photo_id": photo_id,
             "uuid": photo_id,
             "metadata": metadata_fields,
-            "quality": quality_fields,
             "ai_model": ai_model,
             "ai_rundate": ai_rundate
         })

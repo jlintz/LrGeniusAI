@@ -1,5 +1,5 @@
 """
-Service layer for metadata generation and quality scoring across different LLM providers.
+Service layer for metadata generation across different LLM providers.
 Handles provider selection, initialization, and orchestration.
 Uses lazy loading - providers are only initialized when needed.
 """
@@ -9,8 +9,6 @@ from llm_provider_base import (
     LLMProviderBase, 
     MetadataGenerationRequest, 
     MetadataGenerationResponse,
-    QualityScoreRequest,
-    QualityScoreResponse
 )
 from llm_provider_ollama import OllamaProvider
 from llm_provider_lmstudio import LMStudioProvider
@@ -26,7 +24,7 @@ from config import TORCH_DEVICE
 
 class AnalysisService:
     """
-    Central service for managing metadata generation and quality scoring across multiple LLM providers.
+    Central service for managing metadata generation across multiple LLM providers.
     Handles provider initialization, selection, and fallback logic.
     Uses lazy loading - providers are created but models loaded only on first use.
     """
@@ -106,9 +104,9 @@ class AnalysisService:
         return list(self.providers.keys())
 
     def analyze_batch(self, image_triplets: list[tuple[bytes, str, str]], options: dict, image_model, image_processor,
-                     uuids_needing_embeddings=None, uuids_needing_metadata=None, uuids_needing_quality=None):
+                     uuids_needing_embeddings=None, uuids_needing_metadata=None):
         """
-        Analyzes a batch of images, generating embeddings, metadata, and quality scores.
+        Analyzes a batch of images, generating embeddings and metadata.
         Only generates data for UUIDs in the corresponding needing_* lists.
         """
         uuids = [triplet[1] for triplet in image_triplets]
@@ -120,8 +118,6 @@ class AnalysisService:
             uuids_needing_embeddings = uuids if options.get('compute_embeddings', True) else []
         if uuids_needing_metadata is None:
             uuids_needing_metadata = uuids if options.get('compute_metadata', False) else []
-        if uuids_needing_quality is None:
-            uuids_needing_quality = uuids if options.get('compute_quality', True) else []
 
         embeddings = None
         if len(uuids_needing_embeddings) > 0:
@@ -133,8 +129,6 @@ class AnalysisService:
                     embeddings.append(emb[0] if emb else None)
                 else:
                     embeddings.append(None)  # Placeholder for images not needing embeddings
-
-        datetimes = self._read_datetime_from_exifs(uuids, image_data)
 
         metadata_results = None
         if len(uuids_needing_metadata) > 0:
@@ -156,27 +150,10 @@ class AnalysisService:
                 else:
                     metadata_results.append(None)
 
-        ratings = None
-        if len(uuids_needing_quality) > 0:
-            logger.info(f"Generating quality scores for {len(uuids_needing_quality)} images out of {len(uuids)} total")
-            logger.info(f"UUIDs needing quality: {uuids_needing_quality}")
-            # Filter to only process images that need quality scores
-            filtered_triplets = [(image_data[i], uuids[i], '') for i, uuid in enumerate(uuids) if uuid in uuids_needing_quality]
-            logger.info(f"Filtered to {len(filtered_triplets)} triplets for quality generation")
-            partial_ratings = self._get_quality_scores_batch([t[1] for t in filtered_triplets], 
-                                                            [t[0] for t in filtered_triplets], 
-                                                            options)
-            # Reconstruct full ratings array
-            ratings = []
-            partial_idx = 0
-            for uuid in uuids:
-                if uuid in uuids_needing_quality:
-                    ratings.append(partial_ratings[partial_idx] if partial_ratings else None)
-                    partial_idx += 1
-                else:
-                    ratings.append(None)
-        
-        return embeddings, datetimes, metadata_results, ratings
+        # Datetime/capture_time extraction is handled entirely by the client
+        # (Lightroom plugin) via explicit fields in the request and stored in
+        # service_index.process_image_task.
+        return embeddings, metadata_results
 
     def _generate_image_embeddings(self, images: List[Image.Image], image_model, image_processor) -> List[Optional[List[float]]]:
         """
@@ -206,28 +183,6 @@ class AnalysisService:
         
         return embeddings
 
-    def _read_datetime_from_exifs(self, uuids: List[str], image_data: List[bytes]) -> Dict[str, Optional[float]]:
-        """
-        Analyzes image data to extract capture time for a batch of images.
-        """
-        results = {}
-        for i, data in enumerate(image_data):
-            uuid = uuids[i]
-            capture_time = None
-            try:
-                image_for_exif = Image.open(io.BytesIO(data))
-                exif_data = image_for_exif.getexif()
-                if exif_data:                    
-                    date_time_original = exif_data.get(36867) # DateTimeOriginal
-                    if date_time_original:
-                        dt_object = datetime.strptime(date_time_original, '%Y:%m:%d %H:%M:%S')
-                        capture_time = float(dt_object.timestamp())
-            except Exception as e:
-                logger.warning(f"Could not read EXIF data for {uuid}: {e}")
-            
-            results[uuid] = capture_time
-        return results
-
     def _generate_metadata_batch(self, uuids: List[str], image_data: List[bytes], options: dict) -> List[Optional[MetadataGenerationResponse]]:
         """
         Generates metadata for all images in the batch.
@@ -235,16 +190,6 @@ class AnalysisService:
         results = []
         for i, uuid in enumerate(uuids):
             response = self.generate_metadata_single(uuid, image_data[i], options)
-            results.append(response)
-        return results
-
-    def _get_quality_scores_batch(self, uuids: List[str], image_data: List[bytes], options: dict) -> List[Optional[QualityScoreResponse]]:
-        """
-        Generates quality scores for all images in the batch.
-        """
-        results = []
-        for i, uuid in enumerate(uuids):
-            response = self.generate_quality_scores_single(uuid, image_data[i], options)
             results.append(response)
         return results
 
@@ -293,6 +238,7 @@ class AnalysisService:
             system_prompt=options.get('prompt'),
             date_time=options.get('date_time'),
             ollama_base_url=options.get('ollama_base_url'),
+            lmstudio_base_url=options.get('lmstudio_base_url'),
         )
         
         try:
@@ -303,52 +249,14 @@ class AnalysisService:
         except Exception as e:
             logger.error(f"Unexpected error during metadata generation for {uuid}: {e}", exc_info=True)
             return MetadataGenerationResponse(uuid=uuid, success=False, error=str(e))
-    
-    def generate_quality_scores_single(
-        self,
-        uuid: str,
-        image_data: bytes,
-        options: dict
-    ) -> QualityScoreResponse:
-        """
-        Generate quality scores for a single image.
-        """
-        provider = options.get('provider') or DEFAULT_METADATA_PROVIDER
-        
-        if provider not in self.providers:
-            if not self.providers:
-                return QualityScoreResponse(uuid=uuid, success=False, error="No LLM providers available")
-            provider = list(self.providers.keys())[0]
-            logger.warning(f"Requested provider '{provider}' not available, using fallback: {provider}")
-        
-        selected_provider = self.providers[provider]
-        logger.info(f"Generating quality scores for {uuid} using {provider}")
-        
-        request = QualityScoreRequest(
-            image_data=image_data,
-            uuid=uuid,
-            provider=provider,
-            model=options['model'],
-            api_key=options.get('api_key'),
-            language=options['language'],
-            temperature=options['temperature'],
-            max_tokens=options.get('max_tokens'),
-            system_prompt=options.get('system_prompt'),
-            user_prompt=options.get('user_prompt'),
-            ollama_base_url=options.get('ollama_base_url'),
-        )
-        
-        try:
-            response = selected_provider.generate_quality_scores(request)
-            if not response.success:
-                logger.error(f"✗ Failed to generate quality scores for {uuid}: {response.error}")
-            return response
-        except Exception as e:
-            logger.error(f"Unexpected error during quality scoring for {uuid}: {e}", exc_info=True)
-            return QualityScoreResponse(uuid=uuid, success=False, error=str(e))
 
-    def get_available_models(self, openai_apikey: Optional[str] = None, gemini_apikey: Optional[str] = None,
-                            ollama_base_url: Optional[str] = None) -> Dict[str, List[str]]:
+    def get_available_models(
+        self,
+        openai_apikey: Optional[str] = None,
+        gemini_apikey: Optional[str] = None,
+        ollama_base_url: Optional[str] = None,
+        lmstudio_base_url: Optional[str] = None,
+    ) -> Dict[str, List[str]]:
         """
         Return all available multimodal (vision-capable) models from all providers.
         """
@@ -362,6 +270,10 @@ class AnalysisService:
                 
                 if provider_name == 'ollama' and ollama_base_url:
                     provider_instance = OllamaProvider({'base_url': ollama_base_url})
+                if provider_name == 'lmstudio' and lmstudio_base_url:
+                    # Reuse existing provider instance but point it to a different host
+                    provider_instance.host = lmstudio_base_url
+
                 if provider_name in ['ollama', 'lmstudio'] and not provider_instance.is_available():
                     result[provider_name] = []
                     continue

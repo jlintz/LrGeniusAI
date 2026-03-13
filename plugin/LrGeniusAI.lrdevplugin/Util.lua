@@ -293,13 +293,13 @@ function Util.getGlobalPhotoIdForPhoto(photo, options)
 
     if not options.forceRecompute and not Util.nilOrEmpty(cachedId) then
         if cachedAlgorithm == STABLE_ID_ALGO then
-            log:trace("getGlobalPhotoIdForPhoto: cache hit for " .. tostring(originalFilePath))
+            -- log:trace("getGlobalPhotoIdForPhoto: cache hit for " .. tostring(originalFilePath))
             return cachedId, nil
         end
         if cachedAlgorithm == LEGACY_HASH_ALGO
             and cachedSize == tonumber(attributes.fileSize)
             and math.floor(cachedMtime or 0) == math.floor(tonumber(attributes.fileModificationDate) or 0) then
-            log:trace("getGlobalPhotoIdForPhoto: cache hit for legacy hash " .. tostring(originalFilePath))
+            -- log:trace("getGlobalPhotoIdForPhoto: cache hit for legacy hash " .. tostring(originalFilePath))
             return cachedId, nil
         end
     end
@@ -660,6 +660,15 @@ end
 
 function Util.waitForServerDialog()
     if SearchIndexAPI.pingServer() then
+        local compatible, versionMessage = SearchIndexAPI.ensureVersionCompatibility()
+        if not compatible then
+            LrDialogs.message(
+                "Plugin/Backend version mismatch",
+                versionMessage or "Version check failed.",
+                "critical"
+            )
+            return false
+        end
         return true
     end
 
@@ -679,7 +688,17 @@ function Util.waitForServerDialog()
         local timeout = 60 -- 60 seconds timeout
         while not progressScope:isCanceled() and elapsedTime < timeout do
             if SearchIndexAPI.pingServer() then
+                local compatible, versionMessage = SearchIndexAPI.ensureVersionCompatibility()
                 progressScope:done()
+                if not compatible then
+                    LrDialogs.message(
+                        "Plugin/Backend version mismatch",
+                        versionMessage or "Version check failed.",
+                        "critical"
+                    )
+                    result = false
+                    return
+                end
                 result = true
                 return
             end

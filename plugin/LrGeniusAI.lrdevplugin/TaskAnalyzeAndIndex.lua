@@ -1,5 +1,5 @@
 -- TaskAnalyzeAndIndex.lua
--- Unified task for analyzing photos with AI (metadata + quality scores) and indexing them.
+-- Unified task for analyzing photos with AI metadata and indexing them.
 -- Combines the old TaskAnalyzeImage and TaskManageIndex into one streamlined workflow.
 
 
@@ -27,7 +27,6 @@ local function showAnalyzeAndIndexDialog(ctx)
     props.enableFaces = prefs.enableFaces or false
     props.enableVertexAI = prefs.enableVertexAI or false
     props.enableImportBeforeIndex = prefs.enableImportBeforeIndex or false
-    props.enableQuality = false 
     props.regenerateMetadata = prefs.regenerateMetadata or false
     
     -- Metadata generation options
@@ -98,7 +97,6 @@ local function showAnalyzeAndIndexDialog(ctx)
     props.submitKeywords = prefs.submitKeywords or false
     props.submitFolderName = prefs.submitFolderName or false
     props.showPhotoContextDialog = prefs.showPhotoContextDialog or false
-    props.submitDateTime = prefs.submitDateTime or false
     
     -- SaveDataToCatalog
     props.saveDataToCatalog = prefs.saveDataToCatalog ~= false -- default true
@@ -360,13 +358,6 @@ local function showAnalyzeAndIndexDialog(ctx)
                 f:static_text {
                     title = LOC "$$$/lrc-ai-assistant/PluginInfoDialogSections/submitKeywords=Existing Keywords",
                 },
-                f:checkbox {
-                    value = bind 'submitDateTime',
-                    width = share 'checkboxWidth',
-                },
-                f:static_text {
-                    title = LOC "$$$/lrc-ai-assistant/PluginInfoDialogSections/submitDateTime=Capture Date/Time",
-                },
             },
             f:row {
                 f:checkbox {
@@ -419,7 +410,6 @@ local function showAnalyzeAndIndexDialog(ctx)
         prefs.enableMetadata = props.enableMetadata
         prefs.enableFaces = props.enableFaces
         prefs.enableVertexAI = props.enableVertexAI
-        prefs.enableQuality = props.enableQuality
         prefs.enableImportBeforeIndex = props.enableImportBeforeIndex
         prefs.regenerateMetadata = props.regenerateMetadata
         prefs.generateKeywords = props.generateKeywords
@@ -440,7 +430,6 @@ local function showAnalyzeAndIndexDialog(ctx)
         prefs.submitGPS = props.submitGPS
         prefs.submitKeywords = props.submitKeywords
         prefs.submitFolderName = props.submitFolderName
-        prefs.submitDateTime = props.submitDateTime
         prefs.showPhotoContextDialog = props.showPhotoContextDialog
         prefs.enableValidation = props.enableValidation
         prefs.saveDataToCatalog = props.saveDataToCatalog
@@ -554,7 +543,7 @@ LrTasks.startAsyncTask(function()
         if not props then return end
 
         -- Validate that at least one task is selected
-        if not props.enableEmbeddings and not props.enableMetadata and not props.enableQuality and not props.enableFaces and not props.enableVertexAI then
+        if not props.enableEmbeddings and not props.enableMetadata and not props.enableFaces and not props.enableVertexAI then
             LrDialogs.showError(LOC "$$$/LrGeniusAI/AnalyzeAndIndex/NoTasksSelected=Please select at least one task to perform.")
             return
         end
@@ -563,7 +552,6 @@ LrTasks.startAsyncTask(function()
         local tasks = {}
         if props.enableEmbeddings then table.insert(tasks, "embeddings") end
         if props.enableMetadata then table.insert(tasks, "metadata") end
-        if props.enableQuality then table.insert(tasks, "quality") end
         if props.enableFaces then table.insert(tasks, "faces") end
         if props.enableVertexAI then table.insert(tasks, "vertexai") end
 
@@ -595,9 +583,7 @@ LrTasks.startAsyncTask(function()
             submit_keywords = props.submitKeywords,
             submit_folder_names = props.submitFolderName,
             submit_user_context = props.showPhotoContextDialog,
-            submit_date_time = props.submitDateTime,
             enableMetadata = props.enableMetadata,
-            enableQuality = props.enableQuality,
             enableFaces = props.enableFaces,
             enableVertexAI = props.enableVertexAI,
             replace_ss = props.replaceSS,
@@ -654,14 +640,26 @@ LrTasks.startAsyncTask(function()
         local taskOptionsForScope = (props.scope == "missing") and {
             enableEmbeddings = props.enableEmbeddings,
             enableMetadata = props.enableMetadata,
-            enableQuality = props.enableQuality,
             enableFaces = props.enableFaces,
             enableVertexAI = props.enableVertexAI,
             regenerateMetadata = props.regenerateMetadata
         } or nil
-        local photosToProcess, errorStatus = PhotoSelector.getPhotosInScope(props.scope, taskOptionsForScope)
+
+        local lookupProgressScope
+        if props.scope == "missing" then
+            lookupProgressScope = LrProgressScope({
+                title = LOC "$$$/LrGeniusAI/AnalyzeAndIndex/LookupTitle=Looking up which photos need processing...",
+                functionContext = context,
+                parent = progressScope,
+            })
+        end
+        local photosToProcess, errorStatus = PhotoSelector.getPhotosInScope(props.scope, taskOptionsForScope, lookupProgressScope)
+        if lookupProgressScope then
+            lookupProgressScope:done()
+        end
 
         if photosToProcess == nil or type(photosToProcess) ~= 'table' or #photosToProcess == 0 then
+            progressScope:done()
             if errorStatus == "Invalid view" then
                 LrDialogs.message(
                     LOC "$$$/LrGeniusAI/common/InvalidViewTitle=Invalid View",
@@ -675,6 +673,13 @@ LrTasks.startAsyncTask(function()
                 )
             end
             return
+        end
+
+        -- Update main progress with photo count (counter)
+        progressScope:setCaption(LOC("$$$/LrGeniusAI/AnalyzeAndIndex/ProgressCount=^1 photos to process", tostring(#photosToProcess)))
+        -- Reset progress portion after delta lookup so subsequent phases (import, processing) start from 0
+        if props.scope == "missing" then
+            progressScope:setPortionComplete(0, 1)
         end
 
         -- If photo context dialog is enabled, show it for each photo
@@ -720,7 +725,7 @@ LrTasks.startAsyncTask(function()
         
         status, processed, failed, processedPhotos = SearchIndexAPI.analyzeAndIndexSelectedPhotos(photosToProcess, processingProgressScope, options)
 
-        if status ~= "allfailed" and (props.enableMetadata or props.enableQuality) and props.saveDataToCatalog then
+        if status ~= "allfailed" and props.enableMetadata and props.saveDataToCatalog then
             log:trace("Saving metadata for processed photos...")
             local savedCount = 0
             local skippedCount = 0
@@ -737,46 +742,58 @@ LrTasks.startAsyncTask(function()
                     log:trace("Response: " .. (Util.dumpTable(response) or "nil"))
 
                     if props.enableValidation and props.enableMetadata and response and response.metadata then
-                        -- Show validation dialog
                         local result, validatedData = nil, nil
+
                         if not skipFromHere then
+                            -- Show validation dialog
                             result, validatedData = MetadataManager.showValidationDialog(context, photo, response, {
                                 applyKeywords = props.generateKeywords,
                                 applyTitle = props.generateTitle,
                                 applyCaption = props.generateCaption,
                                 applyAltText = props.generateAltText,
-                                applyQuality = props.enableQuality,
                             })
 
                             if validatedData ~= nil and validatedData.skipFromHere then
                                 log:trace("Skipping validation from here for subsequent photos.")
                                 skipFromHere = true
                             end
-                        else
-                            skippedCount = skippedCount + 1
-                        end
 
-                        if result == "ok" and validatedData then
-                            -- Apply validated metadata
-                            MetadataManager.applyMetadata(photo, response, validatedData, {
+                            if result == "ok" and validatedData then
+                                -- Apply validated metadata
+                                MetadataManager.applyMetadata(photo, response, validatedData, {
+                                    applyKeywords = props.generateKeywords,
+                                    applyTitle = props.generateTitle,
+                                    applyCaption = props.generateCaption,
+                                    applyAltText = props.generateAltText,
+                                    useTopLevelKeyword = props.useTopLevelKeyword,
+                                    topLevelKeyword = props.topLevelKeyword,
+                                })
+
+                                -- Overwrite with validated data
+                                log:trace("Reimported validated metadata for photo: " .. (photo:getFormattedMetadata('fileName') or "unknown"))
+                                SearchIndexAPI.importMetadataFromCatalog({ photo }, progressScope)
+
+                                savedCount = savedCount + 1
+                            elseif result == "other" then
+                                skippedCount = skippedCount + 1
+                            elseif result == "cancel" then
+                                break
+                            end
+                        else
+                            -- Validation has been skipped from here on; apply metadata without showing dialog
+                            MetadataManager.applyMetadata(photo, response, nil, {
                                 applyKeywords = props.generateKeywords,
                                 applyTitle = props.generateTitle,
                                 applyCaption = props.generateCaption,
                                 applyAltText = props.generateAltText,
-                                applyQuality = props.enableQuality,
                                 useTopLevelKeyword = props.useTopLevelKeyword,
                                 topLevelKeyword = props.topLevelKeyword,
                             })
 
-                            -- Overwrite with validated data
-                            log:trace("Reimported validated metadata for photo: " .. (photo:getFormattedMetadata('fileName') or "unknown"))
+                            log:trace("Applied metadata without validation for photo (skipFromHere active): " .. (photo:getFormattedMetadata('fileName') or "unknown"))
                             SearchIndexAPI.importMetadataFromCatalog({ photo }, progressScope)
 
                             savedCount = savedCount + 1
-                        elseif result == "other" then
-                            skippedCount = skippedCount + 1
-                        elseif result == "cancel" then
-                            break
                         end
 
                     elseif props.enableMetadata and response and response.metadata then
@@ -786,7 +803,6 @@ LrTasks.startAsyncTask(function()
                             applyTitle = props.generateTitle,
                             applyCaption = props.generateCaption,
                             applyAltText = props.generateAltText,
-                            applyQuality = props.enableQuality,
                             useTopLevelKeyword = props.useTopLevelKeyword,
                             topLevelKeyword = props.topLevelKeyword,
                         })

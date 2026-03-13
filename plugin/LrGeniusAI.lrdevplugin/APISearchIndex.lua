@@ -22,12 +22,16 @@ local ENDPOINTS = {
     INDEX = "/index",
     INDEX_BY_REFERENCE = "/index_by_reference",
     INDEX_BASE64 = "/index_base64",
+    GROUP_SIMILAR = "/group_similar",
+    CULL = "/cull",
     SEARCH = "/search",
-    STATS = "/stats",
+    STATS = "/db/stats",
     MODELS = "/models",
     GET_IDS = "/get/ids",
     REMOVE = "/remove",
     PING = "/ping",
+    VERSION = "/version",
+    VERSION_CHECK = "/version/check",
     SHUTDOWN = "/shutdown",
     IMPORT_METADATA = "/import/metadata",
     START_CLIP_DOWNLOAD = "/clip/download/start",
@@ -39,7 +43,8 @@ local ENDPOINTS = {
     FACES_PERSON_PHOTOS = "/faces/persons",  -- suffix /<id>/photos
     FACES_DETECT = "/faces/detect",
     FACES_QUERY = "/faces/query",
-    MIGRATE_PHOTO_IDS = "/database/migrate-photo-ids",
+    MIGRATE_PHOTO_IDS = "/db/migrate-photo-ids",
+    DB_BACKUP = "/db/backup",
 }
 
 local EXPORT_SETTINGS = {
@@ -47,7 +52,7 @@ local EXPORT_SETTINGS = {
         LR_export_useSubfolder = false,
         LR_format = 'JPEG',
         LR_jpeg_quality = tonumber(prefs.exportQuality) or 60,
-        LR_minimizeEmbeddedMetadata = true,
+        LR_minimizeEmbeddedMetadata = false,
         LR_outputSharpeningOn = false,
         LR_size_doConstrain = true,
         LR_size_maxHeight = tonumber(prefs.exportSize) or 1024,
@@ -127,6 +132,8 @@ function SearchIndexAPI.findPhotosByPhotoIds(photoIds)
             local photo = catalog:findPhotoByUuid(photoId)
             if photo then
                 table.insert(photos, photo)
+            else
+                log:warn("findPhotosByPhotoIds: Photo with UUID " .. tostring(photoId) .. " not found in catalog (non-global IDs).")
             end
         end
         return photos
@@ -138,7 +145,11 @@ function SearchIndexAPI.findPhotosByPhotoIds(photoIds)
     end
 
     local photoById = {}
+    local startedAt = LrDate.currentTime()
     local allPhotos = catalog:getAllPhotos()
+    local allPhotosElapsed = math.floor((LrDate.currentTime() - startedAt) * 1000)
+    log:trace("findPhotosByPhotoIds: catalog:getAllPhotos() returned " .. tostring(#allPhotos) ..
+        " photos in " .. tostring(allPhotosElapsed) .. "ms")
 
     for _, photo in ipairs(allPhotos) do
         local cachedId = photo:getPropertyForPlugin(_PLUGIN, "globalPhotoId")
@@ -147,16 +158,12 @@ function SearchIndexAPI.findPhotosByPhotoIds(photoIds)
         end
     end
 
-    for _, photo in ipairs(allPhotos) do
-        local candidateId = getPhotoIdForPhoto(photo)
-        if candidateId and idSet[candidateId] and not photoById[candidateId] then
-            photoById[candidateId] = photo
-        end
-    end
-
     for _, photoId in ipairs(photoIds) do
-        if photoById[photoId] then
-            table.insert(photos, photoById[photoId])
+        local photo = photoById[photoId]
+        if photo then
+            table.insert(photos, photo)
+        else
+            log:warn("findPhotosByPhotoIds: Photo with global ID " .. tostring(photoId) .. " not found in catalog.")
         end
     end
 
@@ -235,7 +242,149 @@ end
 
 
 ---
--- Unified function to analyze and index photos with metadata, quality scores, and embeddings.
+-- Gets a JPEG thumbnail from Lightroom's preview system (must be called from LrTasks async context).
+-- Uses photo:requestJpegThumbnail(width, height, callback) and waits for the callback with a timeout.
+-- @param photo LrPhoto
+-- @param minWidth number Minimum width (long edge); nil = smallest preview.
+-- @param minHeight number Optional; if minWidth is set, controls height of returned pixels.
+-- @param requestState table|nil Optional state/config with timeoutSeconds.
+-- @return string|nil JPEG data string, or nil on failure.
+-- @return string|nil Error message when JPEG is nil.
+--
+function SearchIndexAPI.getJpegThumbnailForPhoto(photo, minWidth, minHeight, requestState)
+    if not photo then
+        return nil, "Photo is nil"
+    end
+    local result = nil
+    local errResult = nil
+    local done = false
+    local callbackCount = 0
+    local timeoutSeconds = tonumber(requestState and requestState.timeoutSeconds) or tonumber(prefs and prefs.previewThumbnailTimeoutSeconds) or 12
+    local deadline = LrDate.currentTime() + timeoutSeconds
+
+    local callback = function(jpegData, err)
+        callbackCount = callbackCount + 1
+
+        -- Adobe reports that the callback may fire more than once. Prefer the
+        -- first non-empty JPEG payload and otherwise keep waiting until timeout.
+        if jpegData and type(jpegData) == "string" and #jpegData > 0 then
+            result = jpegData
+            errResult = nil
+            done = true
+            return
+        end
+
+        if err and err ~= "" then
+            errResult = err
+        elseif not errResult then
+            errResult = "No thumbnail data"
+        end
+    end
+
+    local requestObj = photo:requestJpegThumbnail(minWidth, minHeight, callback)
+    if not requestObj then
+        return nil, "requestJpegThumbnail failed to start"
+    end
+
+    while not done and LrDate.currentTime() < deadline do
+        if MAC_ENV then
+            LrTasks.yield()
+        else
+            LrTasks.sleep(0.05)
+        end
+    end
+
+    if not done then
+        return nil, string.format("Thumbnail request timed out after %.1fs (callbacks=%d)", timeoutSeconds, callbackCount)
+    end
+    if result and type(result) == "string" and #result > 0 then
+        return result, nil
+    end
+    return nil, errResult or "No thumbnail data"
+end
+
+
+---
+-- Analyzes and indexes a single photo using base64-encoded JPEG (e.g. from requestJpegThumbnail).
+-- Uses the /index_base64 endpoint; same options as analyzeAndIndexPhoto.
+-- @param photoId string
+-- @param jpegData string Raw JPEG bytes.
+-- @param filename string Display filename for logging.
+-- @param options table Same as analyzeAndIndexPhoto.
+-- @return boolean success, table|string response or error.
+--
+function SearchIndexAPI.analyzeAndIndexPhotoBase64(photoId, jpegData, filename, options)
+    if not jpegData or type(jpegData) ~= "string" or #jpegData == 0 then
+        log:error("analyzeAndIndexPhotoBase64: no JPEG data")
+        return false, "No image data provided"
+    end
+    if not photoId or photoId == "" then
+        log:error("Photo ID is missing")
+        return false, "No photo ID provided"
+    end
+
+    options = options or {}
+    local base64Image = LrStringUtils.encodeBase64(jpegData)
+    local url = getBaseUrl() .. ENDPOINTS.INDEX_BASE64
+
+    local body = {
+        image = base64Image,
+        photo_id = photoId,
+        filename = filename or "photo.jpg",
+        tasks = options.tasks or {},
+        provider = options.provider,
+        model = options.model,
+        api_key = options.api_key,
+        language = options.language or (prefs and prefs.generateLanguage) or "English",
+        temperature = tostring(options.temperature or (prefs and prefs.temperature) or 0.2),
+        replace_ss = tostring(options.replace_ss or false),
+        generate_keywords = tostring(options.generate_keywords or false),
+        generate_caption = tostring(options.generate_caption or false),
+        generate_title = tostring(options.generate_title or false),
+        generate_alt_text = tostring(options.generate_alt_text or false),
+        submit_gps = tostring(options.submit_gps or false),
+        submit_keywords = tostring(options.submit_keywords or false),
+        submit_folder_names = tostring(options.submit_folder_names or false),
+        user_context = options.user_context,
+        gps_coordinates = options.gps_coordinates and JSON:encode(options.gps_coordinates) or nil,
+        existing_keywords = options.existing_keywords and JSON:encode(options.existing_keywords) or nil,
+        folder_names = options.folder_names,
+        prompt = options.prompt,
+        keyword_categories = options.keyword_categories and JSON:encode(options.keyword_categories) or "[]",
+        date_time = options.date_time,
+        ollama_base_url = options.ollama_base_url or (prefs and prefs.ollamaBaseUrl),
+        lmstudio_base_url = options.lmstudio_base_url or (prefs and prefs.lmstudioBaseUrl),
+        vertex_project_id = options.vertex_project_id,
+        vertex_location = options.vertex_location,
+        regenerate_metadata = tostring(options.regenerate_metadata ~= false),
+    }
+
+    log:trace("Analyzing and indexing photo (base64): " .. tostring(filename) .. " id " .. photoId)
+
+    local response, err = _request('POST', url, body, 720)
+
+    if not response then
+        log:error("Failed to analyze/index photo (base64): " .. tostring(err))
+        return false, err or "Unknown error"
+    end
+    if response.status == "processed" then
+        local success_count = response.success_count or 0
+        local failure_count = response.failure_count or 0
+        if success_count > 0 then
+            log:trace("Successfully processed photo (base64): " .. tostring(filename))
+            return true, response
+        else
+            log:error("Photo processing failed (base64): " .. tostring(filename))
+            return false, response.error or "Processing failed"
+        end
+    end
+    log:error("Unexpected response status (base64): " .. tostring(response.status))
+    return false, "Unexpected response status"
+end
+
+
+---
+-- Unified function to analyze and index photos with metadata and embeddings.
 -- Replaces the old separate analyze and index workflows.
 -- @param photoId string The ID of the photo.
 -- @param filename string The filename of the photo.
@@ -332,6 +481,9 @@ function SearchIndexAPI.analyzeAndIndexPhoto(photoId, filepath, options)
     if options.ollama_base_url or (prefs and prefs.ollamaBaseUrl) then
         table.insert(mimeChunks, { name = "ollama_base_url", value = options.ollama_base_url or prefs.ollamaBaseUrl })
     end
+    if options.lmstudio_base_url or (prefs and prefs.lmstudioBaseUrl) then
+        table.insert(mimeChunks, { name = "lmstudio_base_url", value = options.lmstudio_base_url or prefs.lmstudioBaseUrl })
+    end
     if options.vertex_project_id and options.vertex_project_id ~= "" then
         table.insert(mimeChunks, { name = "vertex_project_id", value = options.vertex_project_id })
     end
@@ -417,20 +569,6 @@ function SearchIndexAPI.searchIndex(searchTerm, qualitySort, photosToSearch, sea
         }
     end
 
-    -- Vertex AI config from plugin prefs so server can use Vertex for semantic search
-    local vertex_project_id_raw = (searchOptions and searchOptions.vertex_project_id) or (prefs and prefs.vertexProjectId)
-    local vertex_project_id = nil
-    local vertex_location = (searchOptions and searchOptions.vertex_location) or (prefs and prefs.vertexLocation) or "us-central1"
-    if type(vertex_project_id_raw) == "string" then
-        local trimmedProjectId = vertex_project_id_raw:gsub("^%s*(.-)%s*$", "%1")
-        if trimmedProjectId ~= "" then
-            vertex_project_id = trimmedProjectId
-        end
-    end
-    if vertex_location and type(vertex_location) == "string" then
-        vertex_location = vertex_location:gsub("^%s*(.-)%s*$", "%1")
-    end
-
     if photosToSearch and #photosToSearch > 0 then
         -- Perform a scoped search via POST
         local photoIds = {}
@@ -450,10 +588,6 @@ function SearchIndexAPI.searchIndex(searchTerm, qualitySort, photosToSearch, sea
         if search_sources then
             body.search_sources = search_sources
         end
-        if vertex_project_id and vertex_project_id ~= "" then
-            body.vertex_project_id = vertex_project_id
-            body.vertex_location = vertex_location
-        end
         local postUrl = buildUrlWithParams(url, params)
 
         log:trace("Searching index via POST (scoped): " .. postUrl)
@@ -462,19 +596,8 @@ function SearchIndexAPI.searchIndex(searchTerm, qualitySort, photosToSearch, sea
         -- Global search: use POST when search_sources are provided so we can send JSON body
         if search_sources then
             local body = { term = searchTerm, search_sources = search_sources }
-            if vertex_project_id and vertex_project_id ~= "" then
-                body.vertex_project_id = vertex_project_id
-                body.vertex_location = vertex_location
-            end
             local postUrl = buildUrlWithParams(url, params)
             log:trace("Searching index via POST (global with search_sources): " .. postUrl)
-            return _request('POST', postUrl, body)
-        end
-        -- GET without search_sources: still send Vertex config via POST if we have it so Vertex search works
-        if vertex_project_id and vertex_project_id ~= "" then
-            local body = { term = searchTerm, vertex_project_id = vertex_project_id, vertex_location = vertex_location }
-            local postUrl = buildUrlWithParams(url, params)
-            log:trace("Searching index via POST (global with vertex config): " .. postUrl)
             return _request('POST', postUrl, body)
         end
         local getUrl = buildUrlWithParams(url, params)
@@ -485,6 +608,64 @@ end
 
 function SearchIndexAPI.getStats()
     return _request('GET', getBaseUrl() .. ENDPOINTS.STATS)
+end
+
+function SearchIndexAPI.getBackendVersion()
+    return _request('GET', getBaseUrl() .. ENDPOINTS.VERSION)
+end
+
+function SearchIndexAPI.checkVersionCompatibility()
+    local pluginVersion = tostring(Info.MAJOR) .. "." .. tostring(Info.MINOR) .. "." .. tostring(Info.REVISION)
+    local pluginReleaseTag = "v" .. pluginVersion
+    local body = {
+        plugin_version = pluginVersion,
+        plugin_release_tag = pluginReleaseTag,
+        plugin_build = tonumber(Info.BUILD) or 0
+    }
+    return _request('POST', getBaseUrl() .. ENDPOINTS.VERSION_CHECK, body)
+end
+
+function SearchIndexAPI.ensureVersionCompatibility()
+    local result, err = SearchIndexAPI.checkVersionCompatibility()
+    if err then
+        return false, "Version check request failed: " .. tostring(err), nil
+    end
+    if type(result) ~= "table" then
+        return false, "Version check failed: invalid response from backend.", nil
+    end
+    if result.compatible then
+        return true, nil, result
+    end
+
+    local pluginTag = tostring(result.plugin_release_tag or ("v" .. tostring(result.plugin_version or "unknown")))
+    local backendTag = tostring(result.backend_release_tag or ("v" .. tostring(result.backend_version or "unknown")))
+    local reason = tostring(result.reason or "plugin and backend version differ")
+    local message = "Plugin and backend versions are not compatible.\n" ..
+        "Plugin: " .. pluginTag .. "\n" ..
+        "Backend: " .. backendTag .. "\n" ..
+        "Reason: " .. reason
+    return false, message, result
+end
+
+function SearchIndexAPI.formatStats(stats)
+    if type(stats) ~= "table" then
+        return "No statistics available."
+    end
+
+    local photos = stats.photos or {}
+    local faces = stats.faces or {}
+    local persons = stats.persons or {}
+
+    return table.concat({
+        "Photos total: " .. tostring(photos.total or 0),
+        "Photos with embeddings: " .. tostring(photos.with_embedding or 0),
+        "Photos with title: " .. tostring(photos.with_title or 0),
+        "Photos with caption: " .. tostring(photos.with_caption or 0),
+        "Photos with keywords: " .. tostring(photos.with_keywords or 0),
+        "Photos with Vertex AI: " .. tostring(photos.with_vertexai or 0),
+        "Faces total: " .. tostring(faces.total or 0),
+        "Persons total: " .. tostring(persons.total or 0),
+    }, "\n")
 end
 
 function SearchIndexAPI.getAllIndexedPhotoIds(requireEmbeddings)
@@ -501,7 +682,7 @@ function SearchIndexAPI.getAllIndexedPhotoUUIDs(requireEmbeddings)
 end
 
 ---
--- Retrieves metadata and quality scores for a photo by ID.
+-- Retrieves stored metadata for a photo by ID.
 -- @param photoId The photo ID to retrieve.
 -- @return table|nil Response containing metadata and quality fields, or nil on error.
 -- Response structure:
@@ -509,7 +690,6 @@ end
 --     status = "success",
 --     photo_id = "...",
 --     metadata = { title = "...", caption = "...", keywords = {...}, alt_text = "..." },
---     quality = { overall_score = 0.8, composition_score = 0.9, ... }
 --   }
 --
 function SearchIndexAPI.getPhotoData(photoId)
@@ -536,6 +716,50 @@ function SearchIndexAPI.getPhotoData(photoId)
         log:warn("Photo data not found for photo_id: " .. photoId)
         return nil
     end
+end
+
+function SearchIndexAPI.groupSimilarPhotos(photoIds, options)
+    options = options or {}
+    if type(photoIds) ~= "table" or #photoIds == 0 then
+        return nil, "photo_ids required"
+    end
+
+    local body = {
+        photo_ids = photoIds,
+        phash_threshold = options.phash_threshold or "auto",
+        clip_threshold = options.clip_threshold or "auto",
+        time_delta_seconds = options.time_delta_seconds or 2,
+        culling_preset = options.culling_preset or "default",
+    }
+
+    local result, err = _request("POST", getBaseUrl() .. ENDPOINTS.GROUP_SIMILAR, body, 300)
+    if err then
+        log:error("groupSimilarPhotos failed: " .. tostring(err))
+        return nil, err
+    end
+    return result
+end
+
+function SearchIndexAPI.cullPhotos(photoIds, options)
+    options = options or {}
+    if type(photoIds) ~= "table" or #photoIds == 0 then
+        return nil, "photo_ids required"
+    end
+
+    local body = {
+        photo_ids = photoIds,
+        phash_threshold = options.phash_threshold or "auto",
+        clip_threshold = options.clip_threshold or "auto",
+        time_delta_seconds = options.time_delta_seconds or 2,
+        culling_preset = options.culling_preset or "default",
+    }
+
+    local result, err = _request("POST", getBaseUrl() .. ENDPOINTS.CULL, body, 300)
+    if err then
+        log:error("cullPhotos failed: " .. tostring(err))
+        return nil, err
+    end
+    return result
 end
 
 function SearchIndexAPI.removePhotoId(photoId)
@@ -594,7 +818,7 @@ function SearchIndexAPI.removeMissingFromIndex()
 end
 
 ---
--- Analyzes and indexes selected photos with LLM processing (metadata, quality, embeddings).
+-- Analyzes and indexes selected photos with LLM processing (metadata, embeddings).
 -- Uses JPEG export instead of thumbnails for better reliability.
 -- @param selectedPhotos table Array of LrPhoto objects to process.
 -- @param progressScope LrProgressScope Progress scope for UI updates.
@@ -631,6 +855,14 @@ function SearchIndexAPI.analyzeAndIndexSelectedPhotos(selectedPhotos, progressSc
     local activeWorkers = 0
     local keepRunning = true
     local catalog = LrApplication.activeCatalog()
+    local previewRequestState = {
+        enabled = (prefs and prefs.usePreviewThumbnails ~= false),
+        timeoutSeconds = tonumber(prefs and prefs.previewThumbnailTimeoutSeconds) or 12,
+        cooldownSeconds = tonumber(prefs and prefs.previewThumbnailCooldownSeconds) or 1,
+        disableAfterConsecutiveTimeouts = tonumber(prefs and prefs.previewThumbnailDisableAfterTimeouts) or 3,
+        consecutiveTimeouts = 0,
+        disabledForRun = false,
+    }
     
     local analyzeWorker = function()
         while #photoToProcessStack > 0 do
@@ -646,68 +878,85 @@ function SearchIndexAPI.analyzeAndIndexSelectedPhotos(selectedPhotos, progressSc
                 if photoId then
                     log:trace("Using photo_id for " .. filename .. " (hashing_ms=" .. tostring(math.floor((LrDate.currentTime() - hashStart) * 1000)) .. ")")
 
-                    -- Export photo as JPEG
-                    local exportedPhotoPath = SearchIndexAPI.exportPhotoForIndexing(photo)
-                    
-                    if exportedPhotoPath ~= nil then
-
-                        -- Prepare analysis options with photo-specific context
-                        local photoOptions = {}
-                        for k, v in pairs(options) do
-                            photoOptions[k] = v
+                    -- Prepare analysis options with photo-specific context
+                    local photoOptions = {}
+                    for k, v in pairs(options) do
+                        photoOptions[k] = v
+                    end
+                    if options.submit_gps then
+                        local gps = photo:getRawMetadata('gps')
+                        if gps then photoOptions.gps_coordinates = gps end
+                    end
+                    if options.submit_keywords then
+                        local keywords = photo:getFormattedMetadata("keywordTagsForExport")
+                        if keywords then photoOptions.existing_keywords = keywords end
+                    end
+                    if options.submit_folder_names then
+                        local originalFilePath = photo:getRawMetadata("path")
+                        if originalFilePath then
+                            photoOptions.folder_names = Util.getStringsFromRelativePath(originalFilePath)
                         end
+                    end
+                    -- Always submit catalog capture time.
+                    local datetime = photo:getRawMetadata("dateTime")
+                    if datetime ~= nil and type(datetime) == "number" then
+                        -- Keep backwards-compatible ISO string for older backends
+                        photoOptions.date_time = LrDate.timeToW3CDate(datetime)
+                        -- Also send Unix timestamp (seconds since 1970-01-01 UTC)
+                        photoOptions.date_time_unix = LrDate.timeToPosixDate(datetime)
+                    end
+                    photoOptions.user_context = catalog:getPropertyForPlugin(_PLUGIN, 'photoContext') or ""
+                    photoOptions.photo_id = photoId
 
-                        log:trace("Options for photo " .. filename .. ": " .. Util.dumpTable(photoOptions))
-                        
-                        -- Add GPS if enabled
-                        if options.submit_gps then
-                            local gps = photo:getRawMetadata('gps')
-                            if gps then
-                                photoOptions.gps_coordinates = gps
-                            end
-                        end
-                        
-                        -- Add existing keywords if enabled
-                        if options.submit_keywords then
-                            local keywords = photo:getFormattedMetadata("keywordTagsForExport")
-                            if keywords then
-                                photoOptions.existing_keywords = keywords
-                            end
-                        end
-                        
-                        -- Add folder names if enabled
-                        if options.submit_folder_names then
-                            local originalFilePath = photo:getRawMetadata("path")
-                            if originalFilePath then
-                                photoOptions.folder_names = Util.getStringsFromRelativePath(originalFilePath)
-                            end
-                        end
+                    local success, indexResponse
+                    local usePreviewThumbnails = previewRequestState.enabled and not previewRequestState.disabledForRun
+                    local thumbnailSize = tonumber(prefs and prefs.exportSize) or 1024
+                    local leafName = LrPathUtils.leafName(filename or "photo.jpg")
 
-
-                        if options.submit_date_time then
-                            local datetime = photo:getRawMetadata("dateTime")
-                            if datetime ~= nil and type(datetime) == "number" then
-                                photoOptions.date_time = LrDate.timeToW3CDate(datetime)
-                            end
-                        end
-
-
-                        photoOptions.user_context = catalog:getPropertyForPlugin(_PLUGIN, 'photoContext') or ""
-                        photoOptions.photo_id = photoId
-
-                        -- Call unified API to index/analyze
-                        local success, indexResponse = SearchIndexAPI.analyzeAndIndexPhoto(photoId, exportedPhotoPath, photoOptions)
-                        if success then
-                            stats.success = stats.success + 1
+                    if usePreviewThumbnails then
+                        local jpegData, thumbErr = SearchIndexAPI.getJpegThumbnailForPhoto(photo, thumbnailSize, thumbnailSize, previewRequestState)
+                        if jpegData and #jpegData > 0 then
+                            previewRequestState.consecutiveTimeouts = 0
+                            log:trace("Using Lightroom preview for " .. filename)
+                            success, indexResponse = SearchIndexAPI.analyzeAndIndexPhotoBase64(photoId, jpegData, leafName, photoOptions)
                         else
-                            stats.failed = stats.failed + 1
-                            log:error("Failed to analyze/index photo: " .. filename .. " Error: " .. (indexResponse or "Unknown"))
+                            log:trace("Preview unavailable for " .. filename .. ", falling back to export: " .. tostring(thumbErr))
+                            if thumbErr and string.find(thumbErr, "timed out", 1, true) then
+                                previewRequestState.consecutiveTimeouts = previewRequestState.consecutiveTimeouts + 1
+                                if previewRequestState.consecutiveTimeouts >= previewRequestState.disableAfterConsecutiveTimeouts then
+                                    previewRequestState.disabledForRun = true
+                                    log:warn("Disabling Lightroom preview thumbnails for the rest of this batch after " ..
+                                        tostring(previewRequestState.consecutiveTimeouts) .. " consecutive timeouts.")
+                                else
+                                    log:trace("Cooling down preview requests after timeout (" ..
+                                        tostring(previewRequestState.consecutiveTimeouts) .. "/" ..
+                                        tostring(previewRequestState.disableAfterConsecutiveTimeouts) .. ")")
+                                end
+
+                                if previewRequestState.cooldownSeconds > 0 then
+                                    LrTasks.sleep(previewRequestState.cooldownSeconds)
+                                end
+                            else
+                                previewRequestState.consecutiveTimeouts = 0
+                            end
+                            jpegData = nil
                         end
-                        -- Cleanup temp filename
-                        LrFileUtils.delete(exportedPhotoPath)
+                    end
+
+                    if not success then
+                        local exportedPhotoPath = SearchIndexAPI.exportPhotoForIndexing(photo)
+                        if exportedPhotoPath then
+                            log:trace("Using exported JPEG for " .. filename)
+                            success, indexResponse = SearchIndexAPI.analyzeAndIndexPhoto(photoId, exportedPhotoPath, photoOptions)
+                            LrFileUtils.delete(exportedPhotoPath)
+                        end
+                    end
+
+                    if success then
+                        stats.success = stats.success + 1
                     else
                         stats.failed = stats.failed + 1
-                        log:error("Failed to read exported photo: " .. filename)
+                        log:error("Failed to analyze/index photo: " .. filename .. " Error: " .. (indexResponse or "Unknown"))
                     end
                 else
                     stats.failed = stats.failed + 1
@@ -865,7 +1114,8 @@ end
 function SearchIndexAPI.pingServer()
     local url = getBaseUrl() .. "/ping"
     local result, hdrs = LrHttp.get(url)
-    if hdrs.status == 200 and result == "pong" then
+    local status = (type(hdrs) == "number") and hdrs or (type(hdrs) == "table" and hdrs.status) or nil
+    if status == 200 and result == "pong" then
         return true
     else
         return false
@@ -875,6 +1125,101 @@ end
 function SearchIndexAPI.isBackendOnLocalhost()
     local url = getBaseUrl()
     return not not (url:match("^https?://127%.0%.0%.1") or url:match("^https?://localhost"))
+end
+
+function SearchIndexAPI.downloadDatabaseBackup()
+    local url = getBaseUrl() .. ENDPOINTS.DB_BACKUP
+    log:info("downloadDatabaseBackup: start, url=" .. tostring(url))
+    local outputPath = LrDialogs.runSavePanel({
+        title = "Save database backup",
+        prompt = "Save Backup",
+        canCreateDirectories = true,
+        requiredFileType = "zip",
+    })
+    log:info("downloadDatabaseBackup: save panel returned type=" .. tostring(type(outputPath)) .. " value=" .. tostring(outputPath))
+
+    if not outputPath or outputPath == "" then
+        log:info("Database backup download canceled by user")
+        return nil, "canceled"
+    end
+
+    if type(outputPath) ~= "string" then
+        local err = "Save panel returned unexpected type for outputPath: " .. tostring(type(outputPath))
+        log:error("downloadDatabaseBackup: " .. err)
+        return false, err
+    end
+
+    if not outputPath:lower():match("%.zip$") then
+        outputPath = outputPath .. ".zip"
+    end
+
+    log:info("Downloading database backup from " .. url .. " to " .. outputPath)
+
+    -- _request mit leerer Tabelle als body, kein Timeout (vermeidet SDK-Crash), raw=true für Binär-Zip
+    local responseBody, hdrs = _request('GET', url, {}, nil, { raw = true })
+    if responseBody == nil then
+        local err = hdrs or "Backup download failed"
+        log:error("downloadDatabaseBackup: " .. tostring(err))
+        return false, err
+    end
+    local status = (type(hdrs) == "number") and hdrs or (type(hdrs) == "table" and hdrs.status) or nil
+    log:info(
+        "downloadDatabaseBackup: HTTP finished, status=" .. tostring(status) ..
+        ", hdrsType=" .. tostring(type(hdrs)) ..
+        ", bodyType=" .. tostring(type(responseBody)) ..
+        ", bodyLen=" .. tostring(type(responseBody) == "string" and #responseBody or "n/a")
+    )
+    if status == nil or status < 200 or status >= 300 then
+        local err = "Backup download failed. HTTP status: " .. tostring(status or "unknown")
+        if type(responseBody) == "string" and #responseBody > 0 then
+            local ok, decoded = pcall(function()
+                return JSON:decode(responseBody)
+            end)
+            log:info("downloadDatabaseBackup: error response JSON decode ok=" .. tostring(ok) .. ", decodedType=" .. tostring(type(decoded)))
+            if ok and type(decoded) == "table" and decoded.error then
+                err = err .. " - " .. tostring(decoded.error)
+            end
+        elseif responseBody ~= nil then
+            err = err .. " - rawBody(" .. tostring(type(responseBody)) .. "): " .. tostring(responseBody)
+        end
+        log:error(err)
+        return false, err
+    end
+
+    local file, openErr = io.open(outputPath, "wb")
+    if not file then
+        local err = "Could not create backup file: " .. tostring(openErr)
+        log:error(err)
+        return false, err
+    end
+
+    local dataToWrite = responseBody
+    if dataToWrite == nil then
+        dataToWrite = ""
+    elseif type(dataToWrite) ~= "string" then
+        log:warn("downloadDatabaseBackup: responseBody is not a string, converting via tostring. type=" .. tostring(type(dataToWrite)))
+        dataToWrite = tostring(dataToWrite)
+    end
+
+    local writeOk, writeErr = pcall(function()
+        file:write(dataToWrite)
+    end)
+    if not writeOk then
+        file:close()
+        local err = "Could not write backup file: " .. tostring(writeErr)
+        log:error("downloadDatabaseBackup: " .. err)
+        return false, err
+    end
+    file:close()
+
+    if not LrFileUtils.exists(outputPath) then
+        local err = "Backup file was not created."
+        log:error(err)
+        return false, err
+    end
+
+    log:info("Database backup downloaded successfully: " .. outputPath .. " (writtenBytes=" .. tostring(#dataToWrite) .. ")")
+    return true, outputPath
 end
 
 function SearchIndexAPI.shutdownServer()
@@ -1015,7 +1360,7 @@ _requestMultipart = function(url, mimeChunks, timeout)
         local err_msg = "API request failed. HTTP status: " .. tostring(status or (type(hdrs) == "table" and hdrs.status) or hdrs or 'unknown')
         if result and #result > 0 then
             local decoded_err = JSON:decode(result)
-            if decoded_err and decoded_err.error then
+            if type(decoded_err) == "table" and decoded_err.error then
                 err_msg = err_msg .. " - " .. decoded_err.error
             else
                 err_msg = err_msg .. " Response: " .. result
@@ -1026,12 +1371,18 @@ _requestMultipart = function(url, mimeChunks, timeout)
     end
 end
 
-_request = function(method, url, body, timeout)
+_request = function(method, url, body, timeout, options)
+    options = options or {}
     local result, hdrs
     local bodyString = (body and type(body) == 'table') and JSON:encode(body) or nil
 
     if method == 'GET' then
-        result, hdrs = LrHttp.get(url, timeout)
+        -- Einige LR-Versionen crashen bei LrHttp.get(url, number); nur mit einem Argument aufrufen wenn kein Timeout.
+        if timeout ~= nil then
+            result, hdrs = LrHttp.get(url, timeout)
+        else
+            result, hdrs = LrHttp.get(url)
+        end
     elseif method == 'POST' then
         result, hdrs = LrHttp.post(url, bodyString or "", { { field = "Content-Type", value = "application/json" } }, 'POST', timeout)
     elseif method == 'PUT' then
@@ -1047,6 +1398,9 @@ _request = function(method, url, body, timeout)
     -- hdrs kann Tabelle mit .status oder (in einigen LR-Versionen) direkt die Status-Nummer sein
     local status = (type(hdrs) == "number") and hdrs or (type(hdrs) == "table" and hdrs.status) or nil
     if status ~= nil and status >= 200 and status < 300 then
+        if options.raw then
+            return result, hdrs
+        end
         if result and #result > 0 then
             return JSON:decode(result)
         end
@@ -1055,7 +1409,7 @@ _request = function(method, url, body, timeout)
         local err_msg = "API request failed. HTTP status: " .. tostring(status or (type(hdrs) == "table" and hdrs.status) or hdrs or 'unknown')
         if result and #result > 0 then
             local decoded_err = JSON:decode(result)
-            if decoded_err and decoded_err.error then
+            if type(decoded_err) == "table" and decoded_err.error then
                 err_msg = err_msg .. " - " .. decoded_err.error
             else
                 err_msg = err_msg .. " Response: " .. result
@@ -1071,35 +1425,61 @@ end
 -- Gets photos that need processing for "New or unprocessed photos" scope.
 -- When taskOptions is provided, uses backend to check which photos lack the selected tasks' data.
 -- When taskOptions is nil, falls back to legacy behavior: photos not in index (with embeddings).
--- @param taskOptions table|nil { enableEmbeddings, enableMetadata, enableQuality, enableFaces, enableVertexAI, regenerateMetadata }
+-- @param taskOptions table|nil { enableEmbeddings, enableMetadata, enableFaces, enableVertexAI, regenerateMetadata }
+-- @param lookupProgressScope LrProgressScope|nil Optional progress for "looking up which photos need processing".
 -- @return boolean success, table photosToProcess
 --
-function SearchIndexAPI.getMissingPhotosFromIndex(taskOptions)
+function SearchIndexAPI.getMissingPhotosFromIndex(taskOptions, lookupProgressScope)
     local allPhotos = PhotoSelector.getPhotosInScope('all')
     if allPhotos == nil then
         ErrorHandler.handleError("No photos found in catalog", "Something went wrong")
         return false, {}
     end
 
+    local totalCatalog = #allPhotos
+    local function updateLookupProgress(current, total)
+        if lookupProgressScope and not lookupProgressScope:isCanceled() then
+            lookupProgressScope:setPortionComplete(current, total)
+            lookupProgressScope:setCaption(
+                LOC("$$$/LrGeniusAI/AnalyzeAndIndex/LookupProgress=Looking up which photos need processing... ^1/^2", tostring(current), tostring(total)))
+        end
+    end
+
     -- New behavior: use backend to check which photos need processing based on selected tasks
     if taskOptions and type(taskOptions) == "table" then
+        if lookupProgressScope then
+            lookupProgressScope:setCaption(LOC "$$$/LrGeniusAI/AnalyzeAndIndex/LookupPhase1=Preparing catalog photos for lookup...")
+            lookupProgressScope:setPortionComplete(0, totalCatalog)
+        end
+
         local photoIds = {}
-        for _, photo in ipairs(allPhotos) do
+        local updateInterval = math.max(1, math.floor(totalCatalog / 50))
+        for i, photo in ipairs(allPhotos) do
+            if lookupProgressScope and lookupProgressScope:isCanceled() then
+                return false, {}
+            end
             local photoId, idErr = getPhotoIdForPhoto(photo)
             if photoId then
                 table.insert(photoIds, photoId)
             else
                 log:error("Could not compute photo_id for missing-check: " .. tostring(idErr))
             end
+            if i % updateInterval == 0 or i == totalCatalog then
+                updateLookupProgress(i, totalCatalog)
+            end
         end
         if #photoIds == 0 then
             return true, {}
         end
 
+        if lookupProgressScope then
+            lookupProgressScope:setCaption(LOC "$$$/LrGeniusAI/AnalyzeAndIndex/LookupPhase2=Checking server for unprocessed photos...")
+        end
+
+
         local tasks = {}
         if taskOptions.enableEmbeddings then table.insert(tasks, "embeddings") end
         if taskOptions.enableMetadata then table.insert(tasks, "metadata") end
-        if taskOptions.enableQuality then table.insert(tasks, "quality") end
         if taskOptions.enableFaces then table.insert(tasks, "faces") end
         if taskOptions.enableVertexAI then table.insert(tasks, "vertexai") end
 
@@ -1118,11 +1498,23 @@ function SearchIndexAPI.getMissingPhotosFromIndex(taskOptions)
         local photoIdSet = {}
         for _, pid in ipairs(needingPhotoIds) do photoIdSet[pid] = true end
 
+        if lookupProgressScope then
+            lookupProgressScope:setCaption(LOC "$$$/LrGeniusAI/AnalyzeAndIndex/LookupPhase3=Matching photos to process...")
+            lookupProgressScope:setPortionComplete(0, totalCatalog)
+        end
+
+
         local photosToProcess = {}
-        for _, photo in ipairs(allPhotos) do
+        for i, photo in ipairs(allPhotos) do
+            if lookupProgressScope and lookupProgressScope:isCanceled() then
+                return false, {}
+            end
             local photoId = getPhotoIdForPhoto(photo)
             if photoIdSet[photoId] then
                 table.insert(photosToProcess, photo)
+            end
+            if i % updateInterval == 0 or i == totalCatalog then
+                updateLookupProgress(i, totalCatalog)
             end
         end
         return true, photosToProcess
@@ -1268,7 +1660,8 @@ function SearchIndexAPI.getModels(openaiApiKey, geminiApiKey)
     local body = { 
         openai_apikey = openaiApiKey, 
         gemini_apikey = geminiApiKey,
-        ollama_base_url = (prefs and prefs.ollamaBaseUrl) or nil
+        ollama_base_url = (prefs and prefs.ollamaBaseUrl) or nil,
+        lmstudio_base_url = (prefs and prefs.lmstudioBaseUrl) or nil,
     }
     local result, err = _request('POST', url, body)
     if err then
@@ -1453,6 +1846,86 @@ function SearchIndexAPI.migratePhotoIdsFromCatalog()
         " skippedTotal=" .. tostring(skipped)
     )
     return errorTotal == 0, msg
+end
+
+
+---
+-- Generates hash-based global photo IDs for all photos in the current catalog
+-- and writes them to the catalog-only plugin fields, without touching the backend.
+-- Uses Util.getGlobalPhotoIdForPhoto() which will reuse cached IDs when present.
+-- @return boolean success, string message
+--
+function SearchIndexAPI.generateGlobalPhotoIdsForCatalog()
+    local startedAt = LrDate.currentTime()
+    log:info("generateGlobalPhotoIdsForCatalog: started")
+
+    local catalog = LrApplication.activeCatalog()
+    local photos = catalog:getAllPhotos() or {}
+    local totalPhotos = #photos
+
+    if totalPhotos == 0 then
+        log:info("generateGlobalPhotoIdsForCatalog: no photos in catalog")
+        return true, "No photos found in catalog."
+    end
+
+    log:info("generateGlobalPhotoIdsForCatalog: catalog photos to inspect: " .. tostring(totalPhotos))
+
+    local progressScope = LrProgressScope({
+        title = "Generating hash-based photo IDs in catalog...",
+        functionContext = nil,
+    })
+
+    local generated = 0
+    local reused = 0
+    local errors = 0
+
+    for i, photo in ipairs(photos) do
+        if progressScope:isCanceled() then
+            progressScope:done()
+            log:info("generateGlobalPhotoIdsForCatalog: canceled by user at " .. tostring(i) .. "/" .. tostring(totalPhotos))
+            return false, "Photo-ID generation canceled."
+        end
+
+        local hadExistingId = not Util.nilOrEmpty(photo:getPropertyForPlugin(_PLUGIN, "globalPhotoId"))
+
+        local photoId, err = Util.getGlobalPhotoIdForPhoto(photo, {
+            windowBytes = Util.getDefaultPartialHashWindowBytes(),
+        })
+
+        if photoId and photoId ~= "" then
+            if hadExistingId then
+                reused = reused + 1
+            else
+                generated = generated + 1
+            end
+        else
+            errors = errors + 1
+            log:warn("generateGlobalPhotoIdsForCatalog: failed to compute ID for photo: " .. tostring(err))
+        end
+
+        progressScope:setPortionComplete(i, totalPhotos)
+        if i % 250 == 0 or i == totalPhotos then
+            progressScope:setCaption("Generating hash-based photo IDs " .. tostring(i) .. "/" .. tostring(totalPhotos))
+        end
+    end
+
+    progressScope:done()
+
+    local elapsedMs = math.floor((LrDate.currentTime() - startedAt) * 1000)
+    local msg = "Photo-ID generation finished.\n" ..
+        "Catalog photos: " .. tostring(totalPhotos) .. "\n" ..
+        "New IDs generated: " .. tostring(generated) .. "\n" ..
+        "Existing IDs reused: " .. tostring(reused) .. "\n" ..
+        "Errors: " .. tostring(errors)
+
+    log:info(
+        "generateGlobalPhotoIdsForCatalog: finished elapsedMs=" .. tostring(elapsedMs) ..
+        " generated=" .. tostring(generated) ..
+        " reused=" .. tostring(reused) ..
+        " errors=" .. tostring(errors)
+    )
+
+    return errors == 0, msg
 end
 
 
