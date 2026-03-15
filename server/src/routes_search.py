@@ -64,16 +64,21 @@ def search_route():
         search_sources = None
         vertex_project_id = None
         vertex_location = None
+        catalog_id = None
         if request.method == 'POST' and request.is_json:
             body = request.get_json()
             photo_ids_to_search = body.get('photo_ids') or body.get('uuids')
             search_sources = body.get('search_sources')
             vertex_project_id = body.get('vertex_project_id') or body.get('vertexProjectId')
             vertex_location = body.get('vertex_location') or body.get('vertexLocation')
+            catalog_id = body.get('catalog_id')
+        if catalog_id is None:
+            catalog_id = request.args.get('catalog_id')
 
         sorted_results = service_search.search_images(
             term, quality_sort, photo_ids_to_search, search_sources,
-            vertex_project_id=vertex_project_id, vertex_location=vertex_location
+            vertex_project_id=vertex_project_id, vertex_location=vertex_location,
+            catalog_id=catalog_id
         )
         return jsonify(sorted_results)
     except Exception as e:
@@ -102,6 +107,64 @@ def group_similar_route():
         return jsonify(grouped_results)
     except Exception as e:
         logger.error(f"Error during similarity grouping: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@search_bp.route('/find_similar', methods=['POST'])
+def find_similar_route():
+    """Find photos similar to a given photo by perceptual hash (and optionally CLIP)."""
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+
+    data = request.get_json()
+    photo_id = data.get('photo_id') or data.get('uuid')
+    if not photo_id or not str(photo_id).strip():
+        return jsonify({"error": "Missing or invalid 'photo_id' in request body"}), 400
+
+    scope_photo_ids = data.get('scope_photo_ids') or data.get('scope_uuids')
+    max_results = data.get('max_results', 100)
+    try:
+        max_results = max(1, min(int(max_results), 2000))
+    except (TypeError, ValueError):
+        max_results = 100
+
+    phash_max_hamming = data.get('phash_max_hamming', 10)
+    if phash_max_hamming != "auto":
+        try:
+            phash_max_hamming = max(0, min(int(phash_max_hamming), 64))
+        except (TypeError, ValueError):
+            phash_max_hamming = 10
+
+    use_clip = data.get('use_clip', True)
+    if not isinstance(use_clip, bool):
+        use_clip = str(use_clip).lower() in ("true", "1", "yes")
+
+    similarity_mode = (data.get('similarity_mode') or "phash").strip().lower()
+    if similarity_mode not in ("phash", "clip"):
+        similarity_mode = "phash"
+
+    catalog_id = data.get('catalog_id') or request.args.get('catalog_id')
+
+    logger.info(
+        "find_similar: photo_id=%s similarity_mode=%s max_results=%s phash_max_hamming=%s use_clip=%s scope_photo_ids=%s catalog_id=%s",
+        photo_id, similarity_mode, max_results, phash_max_hamming, use_clip,
+        len(scope_photo_ids) if scope_photo_ids else 0,
+        catalog_id or "(none)",
+    )
+    try:
+        results = service_search.find_similar_images(
+            photo_id=str(photo_id).strip(),
+            scope_photo_ids=scope_photo_ids,
+            max_results=max_results,
+            phash_max_hamming=phash_max_hamming,
+            use_clip=use_clip,
+            similarity_mode=similarity_mode,
+            catalog_id=catalog_id,
+        )
+        logger.info("find_similar: returning %s results", len(results))
+        return jsonify({"results": results})
+    except Exception as e:
+        logger.error("Error during find_similar: %s", str(e), exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 

@@ -13,6 +13,7 @@ MetadataManager = {}
 function MetadataManager.applyMetadata(photo, response, validatedData, options)
     log:trace("Applying metadata to photo: " .. photo:getFormattedMetadata('fileName'))
     local catalog = LrApplication.activeCatalog()
+    options = options or {}
 
     local title = response.metadata.title
     local caption = response.metadata.caption
@@ -34,6 +35,22 @@ function MetadataManager.applyMetadata(photo, response, validatedData, options)
         altText = validatedData.altText
         saveKeywords = validatedData.saveKeywords and options.applyKeywords ~= false
         keywords = validatedData.keywords
+    end
+
+    -- When appending, merge resolved values with existing catalog metadata
+    if options.appendMetadata then
+        local existingTitle = photo:getRawMetadata('title') or ""
+        local existingCaption = photo:getRawMetadata('caption') or ""
+        local existingAltText = photo:getRawMetadata('altTextAccessibility') or ""
+        if existingTitle ~= "" and title and title ~= "" then
+            title = existingTitle .. "\n\n" .. title
+        end
+        if existingCaption ~= "" and caption and caption ~= "" then
+            caption = existingCaption .. "\n\n" .. caption
+        end
+        if existingAltText ~= "" and altText and altText ~= "" then
+            altText = existingAltText .. "\n\n" .. altText
+        end
     end
 
     log:trace("Response: " .. Util.dumpTable(response))
@@ -66,8 +83,20 @@ function MetadataManager.applyMetadata(photo, response, validatedData, options)
                 table.insert(prefs.knownTopLevelKeywords, options.topLevelKeyword)
             end
         end
+        -- When appending, build set of existing keyword names so we only add new ones
+        local existingKeywordNames = nil
+        if options.appendMetadata then
+            existingKeywordNames = {}
+            local rawKeywords = photo:getRawMetadata('keywords') or {}
+            for _, kw in ipairs(rawKeywords) do
+                if kw and kw.getName then
+                    existingKeywordNames[kw:getName()] = true
+                end
+            end
+        end
+        local currentTopLevelKeyword = options.useTopLevelKeyword and (options.topLevelKeyword or "LrGeniusAI") or nil
         catalog:withWriteAccessDo("$$$/lrc-ai-assistant/AnalyzeImageTask/saveTopKeyword=Save AI generated keywords", function()
-            MetadataManager.addKeywordRecursively(photo, keywords, topKeyword)
+            MetadataManager.addKeywordRecursively(photo, keywords, topKeyword, existingKeywordNames, currentTopLevelKeyword)
         end, Defaults.catalogWriteAccessOptions)
     end
 
@@ -85,20 +114,25 @@ end
 -- @param photo The LrPhoto object.
 -- @param keywordSubTable A table of keywords, possibly nested.
 -- @param parent The parent LrKeyword object for the current level.
+-- @param existingKeywordNames Optional set of keyword names already on the photo (append mode).
+-- @param currentTopLevelKeyword Optional top-level keyword for this task (avoids prefs race in parallel jobs).
 --
-function MetadataManager.addKeywordRecursively(photo, keywordSubTable, parent)
+function MetadataManager.addKeywordRecursively(photo, keywordSubTable, parent, existingKeywordNames, currentTopLevelKeyword)
     local addKeywords = {}
+    local reservedTopLevel = currentTopLevelKeyword or prefs.topLevelKeyword
     for key, value in pairs(keywordSubTable) do
         -- log:trace("Processing keyword key: " .. tostring(key) .. " value: " .. tostring(value))
         local keyword
         if type(key) == 'string' and key ~= "" and key ~= "None" and key ~= "none" and prefs.useKeywordHierarchy then
             keyword = photo.catalog:createKeyword(key, {}, false, parent, true)
         elseif type(key) == 'number' and value and value ~= "" and value ~= "None" and value ~= "none" then
-            local currentParent = prefs.useKeywordHierarchy and parent or nil
-            if not Util.table_contains(addKeywords, value) then
-                if value == "Ollama" or value == "LMStudio" or value == "Google Gemini" or value == "ChatGPT" or value == prefs.topLevelKeyword then
+            if existingKeywordNames and existingKeywordNames[value] then
+                -- Append mode: skip keyword that already exists on photo
+            elseif not Util.table_contains(addKeywords, value) then
+                if value == "Ollama" or value == "LMStudio" or value == "Google Gemini" or value == "ChatGPT" or value == reservedTopLevel then
                     log:trace("Skipping keyword: " .. tostring(value) .. " as it is reserved.")
                 else
+                    local currentParent = prefs.useKeywordHierarchy and parent or nil
                     keyword = photo.catalog:createKeyword(value, {}, true, currentParent, true)
                     photo:addKeyword(keyword)
                     table.insert(addKeywords, value)
@@ -106,7 +140,7 @@ function MetadataManager.addKeywordRecursively(photo, keywordSubTable, parent)
             end
         end
         if type(value) == 'table' then
-            MetadataManager.addKeywordRecursively(photo, value, keyword)
+            MetadataManager.addKeywordRecursively(photo, value, keyword, existingKeywordNames, currentTopLevelKeyword)
         end
     end
 end

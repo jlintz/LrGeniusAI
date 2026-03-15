@@ -95,6 +95,34 @@ function Util.nilOrEmpty(val)
     end
 end
 
+---
+-- Returns a stable unique identifier for the given catalog, for cross-catalog backend tracking.
+-- Stored in catalog plugin properties; generated once (MD5 of path + timestamp) and reused.
+-- @param catalog LrCatalog|nil Optional; defaults to LrApplication.activeCatalog().
+-- @return string catalog_id (e.g. "cat_" .. 32 hex chars), or nil, error on failure.
+--
+function Util.getCatalogIdentifier(catalog)
+    catalog = catalog or LrApplication.activeCatalog()
+    if not catalog then
+        return nil, "No catalog"
+    end
+    local existing = catalog:getPropertyForPlugin(_PLUGIN, "catalogIdentifier")
+    if not Util.nilOrEmpty(existing) then
+        return existing, nil
+    end
+    local path = catalog:getPath() or ""
+    local seed = path .. tostring(LrDate.currentTime())
+    local digest = LrMD5.digest(seed)
+    if Util.nilOrEmpty(digest) then
+        return nil, "Could not generate catalog identifier"
+    end
+    local catalogId = "cat_" .. digest
+    catalog:withPrivateWriteAccessDo(function()
+        catalog:setPropertyForPlugin(_PLUGIN, "catalogIdentifier", catalogId)
+    end)
+    return catalogId, nil
+end
+
 function Util.string_split(s, delimiter)
     local t = {}
     for str in string.gmatch(s, "([^" .. delimiter .. "]+)") do
@@ -716,6 +744,58 @@ function Util.waitForServerDialog()
     end)
 
     return result
+end
+
+---
+-- Adds a photo to the "Rejected AI Descriptions" collection (under set "LrGeniusAI").
+-- Finds or creates the set and collection by name, then adds the photo.
+-- @param photo LrPhoto
+-- @param writeOptions optional; e.g. Defaults.catalogWriteAccessOptions
+--
+function Util.addPhotoToRejectedDescriptionsCollection(photo, writeOptions)
+    if not photo then return end
+    writeOptions = writeOptions or { timeout = 60 }
+    local catalog = LrApplication.activeCatalog()
+    local setName = LOC "$$$/LrGeniusAI/Rejected/CollectionSetName=LrGeniusAI"
+    local collName = LOC "$$$/LrGeniusAI/Rejected/CollectionName=Rejected AI Descriptions"
+
+    local collectionSet, collection
+
+    local function findSetAndCollection()
+        local children = catalog:getChildCollections()
+        if children then
+            for _, child in ipairs(children) do
+                if child:type() == "LrCollectionSet" and child:getName() == setName then
+                    collectionSet = child
+                    break
+                end
+            end
+        end
+        if not collectionSet then
+            collectionSet = catalog:createCollectionSet(setName, nil, true)
+        end
+        if collectionSet then
+            local collChildren = collectionSet:getChildCollections()
+            if collChildren then
+                for _, c in ipairs(collChildren) do
+                    if c:type() == "LrCollection" and c:getName() == collName then
+                        collection = c
+                        break
+                    end
+                end
+            end
+            if not collection then
+                collection = catalog:createCollection(collName, collectionSet, false)
+            end
+        end
+    end
+
+    catalog:withWriteAccessDo(LOC "$$$/LrGeniusAI/Rejected/AddToCollection=Add to Rejected AI Descriptions", function()
+        findSetAndCollection()
+        if collection then
+            collection:addPhotos({ photo })
+        end
+    end, writeOptions)
 end
 
 return Util

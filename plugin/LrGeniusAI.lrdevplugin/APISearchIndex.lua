@@ -24,11 +24,13 @@ local ENDPOINTS = {
     INDEX_BASE64 = "/index_base64",
     GROUP_SIMILAR = "/group_similar",
     CULL = "/cull",
+    FIND_SIMILAR = "/find_similar",
     SEARCH = "/search",
     STATS = "/db/stats",
     MODELS = "/models",
     GET_IDS = "/get/ids",
     REMOVE = "/remove",
+    REMOVE_METADATA = "/remove/metadata",
     PING = "/ping",
     VERSION = "/version",
     VERSION_CHECK = "/version/check",
@@ -45,6 +47,8 @@ local ENDPOINTS = {
     FACES_QUERY = "/faces/query",
     MIGRATE_PHOTO_IDS = "/db/migrate-photo-ids",
     DB_BACKUP = "/db/backup",
+    SYNC_CLEANUP = "/sync/cleanup",
+    SYNC_CLAIM = "/sync/claim",
 }
 
 local EXPORT_SETTINGS = {
@@ -69,8 +73,146 @@ local EXPORT_SETTINGS = {
 local _request
 local _requestMultipart
 
+-- Returns a string safe for logging; never passes a table to tostring (avoids "table: 0x...").
+local function httpStatusForLog(status, hdrs)
+    if type(status) == "number" then
+        return tostring(status)
+    end
+    if type(hdrs) == "number" then
+        return tostring(hdrs)
+    end
+    if type(hdrs) == "table" then
+        local s = hdrs.status or hdrs.statusCode
+        if type(s) == "number" then
+            return tostring(s)
+        end
+        if type(s) == "string" then
+            return s
+        end
+    end
+    return "unknown"
+end
+
+-- Catalog DB migrations: one-time backend operations per catalog (e.g. claim_photos after cross-catalog soft state).
+-- Each entry: { id = "unique_id", run = function(progressScope) return ok, err [, userMessage] end }. progressScope is optional (nil for migrations that don't need it). Optional userMessage is shown via LrDialogs when present.
+local CATALOG_DB_MIGRATIONS = {
+    {
+        id = "claim_photos_v1",
+        run = function(progressScope)
+            local ok, err, result = SearchIndexAPI.claimPhotosForCatalog(progressScope)
+            local msg = (ok and result and (result.claimed or 0) >= 0) and (tostring(result.claimed or 0) .. " photos claimed for this catalog.") or nil
+            return ok, err, msg
+        end,
+    },
+    -- Add future migrations here, e.g. { id = "some_breaking_change_v1", run = function(progressScope) ... return ok, err [, userMessage] end },
+}
+
+local MIGRATION_IN_PROGRESS = "in_progress"
+
 local function shouldUseGlobalPhotoId()
     return prefs and prefs.useGlobalPhotoId ~= false
+end
+
+local function parseCompletedMigrations(raw)
+    local completed = {}
+    local inProgress = false
+    if raw and raw ~= "" then
+        for part in string.gmatch(raw, "([^,]+)") do
+            part = part:match("^%s*(.-)%s*$") or part
+            if part == MIGRATION_IN_PROGRESS then
+                inProgress = true
+            else
+                completed[part] = true
+            end
+        end
+    end
+    return completed, inProgress
+end
+
+--- Ensures all registered catalog DB migrations have been run for the active catalog. Runs pending ones in background; uses catalog plugin property catalogDbMigrations so each migration runs once per catalog.
+local function ensureDbMigrationsDone()
+    local catalog = LrApplication.activeCatalog()
+    if not catalog then
+        return
+    end
+    local raw = catalog:getPropertyForPlugin(_PLUGIN, "catalogDbMigrations") or ""
+    local completed, inProgress = parseCompletedMigrations(raw)
+    if inProgress then
+        return
+    end
+    local pending = {}
+    for _, m in ipairs(CATALOG_DB_MIGRATIONS) do
+        if not completed[m.id] then
+            pending[#pending + 1] = m
+        end
+    end
+    if #pending == 0 then
+        return
+    end
+    catalog:withPrivateWriteAccessDo(function()
+        local newRaw = (raw == "" or raw:match("%S") == nil) and MIGRATION_IN_PROGRESS or (raw .. "," .. MIGRATION_IN_PROGRESS)
+        catalog:setPropertyForPlugin(_PLUGIN, "catalogDbMigrations", newRaw)
+    end)
+    LrTasks.startAsyncTask(function()
+        local done = raw
+        for _, m in ipairs(pending) do
+            local progressScope
+            if m.id == "claim_photos_v1" then
+                progressScope = LrProgressScope({
+                    title = LOC "$$$/LrGeniusAI/SearchIndexAPI/claimingPhotos=Claiming photos for this catalog...",
+                    functionContext = nil,
+                })
+            end
+            local ok, err, userMessage
+            if type(m.run) == "function" then
+                local status, a, b, c
+                if type(LrTasks) == "table" and type(LrTasks.pcall) == "function" then
+                    status, a, b, c = LrTasks.pcall(function() return m.run(progressScope) end)
+                else
+                    status, a, b, c = pcall(function() return m.run(progressScope) end)
+                end
+                if status then
+                    ok, err, userMessage = a, b, c
+                else
+                    ok, err, userMessage = false, tostring(a), nil
+                end
+            end
+            if ok then
+                done = (done == "" or done:match("%S") == nil) and m.id or (done .. "," .. m.id)
+                catalog:withPrivateWriteAccessDo(function()
+                    catalog:setPropertyForPlugin(_PLUGIN, "catalogDbMigrations", done)
+                end)
+                log:info("Catalog DB migration completed: " .. tostring(m.id))
+                if userMessage and userMessage ~= "" then
+                    LrDialogs.message("Claim photos", userMessage, "info")
+                end
+            else
+                log:warn("Catalog DB migration failed: " .. tostring(m.id) .. " - " .. tostring(err))
+                if m.id == "claim_photos_v1" then
+                    LrDialogs.message("Claim photos failed", tostring(err or "Unknown error") .. "\n\nYou can try again from Plug-in Manager → LrGeniusAI → Backend Server → Claim photos for this catalog.", "critical")
+                end
+            end
+            if progressScope then
+                progressScope:done()
+            end
+        end
+        catalog:withPrivateWriteAccessDo(function()
+            local current = catalog:getPropertyForPlugin(_PLUGIN, "catalogDbMigrations") or ""
+            current = current:gsub("," .. MIGRATION_IN_PROGRESS .. "$", ""):gsub("^" .. MIGRATION_IN_PROGRESS .. ",?", ""):gsub("^%s*,%s*", "")
+            catalog:setPropertyForPlugin(_PLUGIN, "catalogDbMigrations", current)
+        end)
+    end)
+end
+
+--- Returns the stable catalog identifier for the active catalog (for backend catalog-scoped operations).
+local function getCatalogId()
+    local id, err = Util.getCatalogIdentifier()
+    if not id then
+        log:warn("getCatalogId: " .. tostring(err))
+        return nil
+    end
+    ensureDbMigrationsDone()
+    return id
 end
 
 local function getPhotoIdForPhoto(photo)
@@ -331,6 +473,7 @@ function SearchIndexAPI.analyzeAndIndexPhotoBase64(photoId, jpegData, filename, 
         image = base64Image,
         photo_id = photoId,
         filename = filename or "photo.jpg",
+        catalog_id = getCatalogId(),
         tasks = options.tasks or {},
         provider = options.provider,
         model = options.model,
@@ -430,6 +573,10 @@ function SearchIndexAPI.analyzeAndIndexPhoto(photoId, filepath, options)
     
     -- Add form fields
     table.insert(mimeChunks, { name = "photo_id", value = photoId })
+    local cid = getCatalogId()
+    if cid then
+        table.insert(mimeChunks, { name = "catalog_id", value = cid })
+    end
     table.insert(mimeChunks, { name = "tasks", value = JSON:encode(options.tasks or {}) })
     
     if options.provider then
@@ -555,6 +702,10 @@ function SearchIndexAPI.searchIndex(searchTerm, qualitySort, photosToSearch, sea
         term = searchTerm,
         quality_sort = qualitySort,
     }
+    local cid = getCatalogId()
+    if cid then
+        params.catalog_id = cid
+    end
 
     local url = getBaseUrl() .. ENDPOINTS.SEARCH
 
@@ -584,6 +735,7 @@ function SearchIndexAPI.searchIndex(searchTerm, qualitySort, photosToSearch, sea
         local body = {
             term = searchTerm,
             photo_ids = photoIds,
+            catalog_id = getCatalogId(),
         }
         if search_sources then
             body.search_sources = search_sources
@@ -595,7 +747,7 @@ function SearchIndexAPI.searchIndex(searchTerm, qualitySort, photosToSearch, sea
     else
         -- Global search: use POST when search_sources are provided so we can send JSON body
         if search_sources then
-            local body = { term = searchTerm, search_sources = search_sources }
+            local body = { term = searchTerm, search_sources = search_sources, catalog_id = getCatalogId() }
             local postUrl = buildUrlWithParams(url, params)
             log:trace("Searching index via POST (global with search_sources): " .. postUrl)
             return _request('POST', postUrl, body)
@@ -607,7 +759,12 @@ function SearchIndexAPI.searchIndex(searchTerm, qualitySort, photosToSearch, sea
 end
 
 function SearchIndexAPI.getStats()
-    return _request('GET', getBaseUrl() .. ENDPOINTS.STATS)
+    local cid = getCatalogId()
+    local url = getBaseUrl() .. ENDPOINTS.STATS
+    if cid then
+        url = url .. (url:find("?") and "&" or "?") .. "catalog_id=" .. cid
+    end
+    return _request('GET', url)
 end
 
 function SearchIndexAPI.getBackendVersion()
@@ -670,9 +827,20 @@ end
 
 function SearchIndexAPI.getAllIndexedPhotoIds(requireEmbeddings)
     local url = getBaseUrl() .. ENDPOINTS.GET_IDS
-    -- If requireEmbeddings is true, only get UUIDs with real embeddings
+    local params = {}
     if requireEmbeddings then
-        url = url .. "?has_embedding=true"
+        params.has_embedding = "true"
+    end
+    local cid = getCatalogId()
+    if cid then
+        params.catalog_id = cid
+    end
+    if next(params) then
+        local sep = "?"
+        for k, v in pairs(params) do
+            url = url .. sep .. k .. "=" .. v
+            sep = "&"
+        end
     end
     return _request('GET', url)
 end
@@ -700,7 +868,11 @@ function SearchIndexAPI.getPhotoData(photoId)
     
     local url = getBaseUrl() .. "/get"
     local body = { photo_id = photoId }
-    
+    local cid = getCatalogId()
+    if cid then
+        body.catalog_id = cid
+    end
+
     log:trace("Retrieving photo data for photo_id: " .. photoId)
     
     local result, err = _request('POST', url, body)
@@ -762,6 +934,42 @@ function SearchIndexAPI.cullPhotos(photoIds, options)
     return result
 end
 
+---
+-- Find photos similar to the given photo by perceptual hash (and optionally CLIP).
+-- @param photoId string Reference photo ID (must be indexed with phash).
+-- @param options table Optional: scope_photo_ids (table), max_results (number), phash_max_hamming (number), use_clip (boolean), catalog_id (string).
+-- @return table|nil { results = { { photo_id, phash_distance, clip_distance }, ... } }, or nil, err
+--
+function SearchIndexAPI.findSimilarImages(photoId, options)
+    if not photoId or type(photoId) ~= "string" or photoId:match("^%s*$") then
+        return nil, "photo_id required"
+    end
+    options = options or {}
+    local body = {
+        photo_id = photoId,
+        max_results = options.max_results or 100,
+        phash_max_hamming = options.phash_max_hamming or 10,
+        use_clip = options.use_clip ~= false,
+        similarity_mode = options.similarity_mode or "phash",
+    }
+    if options.scope_photo_ids and type(options.scope_photo_ids) == "table" and #options.scope_photo_ids > 0 then
+        body.scope_photo_ids = options.scope_photo_ids
+    end
+    local cid = getCatalogId()
+    if cid then
+        body.catalog_id = cid
+    end
+    log:info("findSimilarImages: photo_id=%s max_results=%s phash_max_hamming=%s scope=%s", photoId, body.max_results, body.phash_max_hamming, body.scope_photo_ids and (#body.scope_photo_ids .. " ids") or "all")
+    local result, err = _request("POST", getBaseUrl() .. ENDPOINTS.FIND_SIMILAR, body, 120)
+    if err then
+        log:error("findSimilarImages failed: " .. tostring(err))
+        return nil, err
+    end
+    local count = (result and result.results and #result.results) or 0
+    log:info("findSimilarImages: got %s similar photo(s)", count)
+    return result
+end
+
 function SearchIndexAPI.removePhotoId(photoId)
     local url = getBaseUrl() .. ENDPOINTS.REMOVE
     local body = { photo_id = photoId }
@@ -780,41 +988,163 @@ function SearchIndexAPI.removeUUID(uuid)
     return SearchIndexAPI.removePhotoId(uuid)
 end
 
-function SearchIndexAPI.removeMissingFromIndex()
-    if shouldUseGlobalPhotoId() then
-        log:warn("removeMissingFromIndex is disabled while useGlobalPhotoId is enabled")
+--- Remove only AI-generated metadata for a photo (keeps embeddings so the photo stays in the index).
+--- Use when the user discards a suggestion in the review dialog so they can regenerate later.
+function SearchIndexAPI.removePhotoMetadata(photoId)
+    local url = getBaseUrl() .. ENDPOINTS.REMOVE_METADATA
+    local body = { photo_id = photoId }
+    log:trace("Removing metadata for photo_id: " .. photoId)
+
+    local result, err = _request('POST', url, body)
+    if not err then
+        return true
+    else
+        ErrorHandler.handleError("Remove metadata failed", err)
         return false
     end
+end
 
-    local indexedUUIDs = SearchIndexAPI.getAllIndexedPhotoIds()
+---
+-- Sync cleanup: disassociate this catalog from backend photos that are no longer in the catalog.
+-- Does not delete backend data; works with global photo ID and cross-catalog backends.
+-- @return boolean success, string|nil error message
+--
+function SearchIndexAPI.syncCleanup()
+    local catalogId = getCatalogId()
+    if not catalogId then
+        log:warn("syncCleanup: no catalog identifier")
+        return false, "No catalog identifier"
+    end
 
-    if indexedUUIDs == nil or type(indexedUUIDs) ~= "table" then
-        log:warn("Failed to retrieve indexed UUIDs")
-        return false
+    if not SearchIndexAPI.pingServer() then
+        return false, "Backend not reachable"
     end
 
     local catalog = LrApplication.activeCatalog()
+    local allPhotos = catalog:getAllPhotos()
+    local photoIds = {}
+    local updateInterval = math.max(1, math.floor(#allPhotos / 50))
 
     local progressScope = LrProgressScope({
         title = LOC "$$$/LrGeniusAI/SearchIndexAPI/cleaningIndex=Cleaning search index",
         functionContext = nil,
     })
 
-    local total = #indexedUUIDs
-    local missingPhotosUUIDs = {}
-    for _, uuid in ipairs(indexedUUIDs) do
-        progressScope:setPortionComplete(_ - 1, total)
-        progressScope:setCaption(LOC "$$$/LrGeniusAI/SearchIndexAPI/cleaningIndexProgress=Cleaning index. Photo ^1/^2", tostring(_), tostring(total))
-        if progressScope:isCanceled() then break end
+    for i, photo in ipairs(allPhotos) do
+        if progressScope:isCanceled() then
+            progressScope:done()
+            return false, "canceled"
+        end
+        local photoId, err = getPhotoIdForPhoto(photo)
+        if photoId then
+            photoIds[#photoIds + 1] = photoId
+        end
+        if i % updateInterval == 0 or i == #allPhotos then
+            progressScope:setPortionComplete(i, #allPhotos)
+            progressScope:setCaption(LOC "$$$/LrGeniusAI/SearchIndexAPI/cleaningIndexProgress=Cleaning index. Photo ^1/^2", tostring(i), tostring(#allPhotos))
+        end
+    end
 
-        local photo = catalog:findPhotoByUuid(uuid)
-        if photo == nil then
-            missingPhotosUUIDs[#missingPhotosUUIDs + 1] = uuid
-            log:trace("Photo with UUID " .. uuid .. " not found in catalog, removing from index")
-            SearchIndexAPI.removeUUID(uuid)
+    progressScope:setCaption(LOC "$$$/LrGeniusAI/SearchIndexAPI/syncCleanupSending=Syncing with backend...")
+    local batchSize = 5000
+    local disassociated = 0
+    for startIdx = 1, #photoIds, batchSize do
+        if progressScope:isCanceled() then
+            progressScope:done()
+            return false, "canceled"
+        end
+        local stopIdx = math.min(startIdx + batchSize - 1, #photoIds)
+        local batch = {}
+        for j = startIdx, stopIdx do
+            batch[#batch + 1] = photoIds[j]
+        end
+        local result, err = _request("POST", getBaseUrl() .. ENDPOINTS.SYNC_CLEANUP, {
+            catalog_id = catalogId,
+            photo_ids = batch,
+        }, 120)
+        if err then
+            progressScope:done()
+            log:error("syncCleanup failed: " .. tostring(err))
+            return false, err
+        end
+        if result and result.disassociated then
+            disassociated = disassociated + result.disassociated
         end
     end
     progressScope:done()
+    log:info("syncCleanup finished: " .. tostring(#photoIds) .. " photos in catalog, " .. tostring(disassociated) .. " disassociated")
+    return true
+end
+
+---
+-- Claim backend photos for this catalog (add catalog_id to their catalog_ids).
+-- Use after migration so existing indexed photos become visible to this catalog.
+-- @param progressScope LrProgressScope|nil Optional; when provided, shows progress and supports cancel.
+-- @return boolean success, string|nil error message, table|nil result
+--
+function SearchIndexAPI.claimPhotosForCatalog(progressScope)
+    local catalogId = getCatalogId()
+    if not catalogId then
+        return false, "No catalog identifier", nil
+    end
+    if not SearchIndexAPI.pingServer() then
+        return false, "Backend not reachable", nil
+    end
+    local catalog = LrApplication.activeCatalog()
+    local allPhotos = catalog:getAllPhotos()
+    local photoIds = {}
+    for _, photo in ipairs(allPhotos) do
+        local photoId, _ = getPhotoIdForPhoto(photo)
+        if photoId then
+            photoIds[#photoIds + 1] = photoId
+        end
+    end
+    if #photoIds == 0 then
+        if progressScope then progressScope:done() end
+        return true, nil, { claimed = 0, errors = 0 }
+    end
+    local batchSize = 2500
+    local totalBatches = math.ceil(#photoIds / batchSize)
+    local totalClaimed = 0
+    local totalErrors = 0
+    for startIdx = 1, #photoIds, batchSize do
+        if progressScope then
+            if progressScope:isCanceled() then
+                progressScope:done()
+                return false, "canceled", nil
+            end
+            local batchNum = math.floor((startIdx - 1) / batchSize) + 1
+            progressScope:setPortionComplete(batchNum - 1, totalBatches)
+            progressScope:setCaption(LOC("$$$/LrGeniusAI/SearchIndexAPI/claimingPhotosBatch=Claiming photos... batch ^1/^2", tostring(batchNum), tostring(totalBatches)))
+        end
+        local stopIdx = math.min(startIdx + batchSize - 1, #photoIds)
+        local batch = {}
+        for j = startIdx, stopIdx do
+            batch[#batch + 1] = photoIds[j]
+        end
+        local result, err = _request("POST", getBaseUrl() .. ENDPOINTS.SYNC_CLAIM, {
+            catalog_id = catalogId,
+            photo_ids = batch,
+        }, 120)
+        if err then
+            if progressScope then progressScope:done() end
+            return false, err, nil
+        end
+        if result then
+            totalClaimed = totalClaimed + (result.claimed or 0)
+            totalErrors = totalErrors + (result.errors or 0)
+        end
+    end
+    if progressScope then
+        progressScope:setPortionComplete(totalBatches, totalBatches)
+    end
+    return true, nil, { claimed = totalClaimed, errors = totalErrors }
+end
+
+function SearchIndexAPI.removeMissingFromIndex()
+    -- Use sync cleanup (soft state): disassociate this catalog from photos no longer in catalog.
+    -- Works with global photo ID and cross-catalog backends; no backend data is deleted.
+    return SearchIndexAPI.syncCleanup()
 end
 
 ---
@@ -1078,7 +1408,12 @@ function SearchIndexAPI.importMetadataFromCatalog(photosToProcess, progressScope
             end
 
             if #metadataBatch > 0 and (#metadataBatch >= batchSize or i == numPhotos) then
-                local response = _request('POST', getBaseUrl() .. ENDPOINTS.IMPORT_METADATA, { metadata_items = metadataBatch })
+                local importBody = { metadata_items = metadataBatch }
+                local importCid = getCatalogId()
+                if importCid then
+                    importBody.catalog_id = importCid
+                end
+                local response = _request('POST', getBaseUrl() .. ENDPOINTS.IMPORT_METADATA, importBody)
                 if response ~= nil and response.status == "processed" then
                     stats.success = stats.success + #metadataBatch
                 else
@@ -1365,7 +1700,7 @@ _requestMultipart = function(url, mimeChunks, timeout)
         end
         return {} -- Return an empty table for successful but empty responses
     else
-        local err_msg = "API request failed. HTTP status: " .. tostring(status or (type(hdrs) == "table" and hdrs.status) or hdrs or 'unknown')
+        local err_msg = "API request failed. HTTP status: " .. httpStatusForLog(status, hdrs)
         if result and #result > 0 then
             local decoded_err = JSON:decode(result)
             if type(decoded_err) == "table" and decoded_err.error then
@@ -1403,7 +1738,7 @@ _request = function(method, url, body, timeout, options)
         return nil, err
     end
 
-    -- hdrs kann Tabelle mit .status oder (in einigen LR-Versionen) direkt die Status-Nummer sein
+    -- hdrs kann Tabelle mit .status oder (in einigen LR-Versionen) direkt die Status-Nummer sein. Bei Verbindungsfehlern kann hdrs ein Fehlerstring sein.
     local status = (type(hdrs) == "number") and hdrs or (type(hdrs) == "table" and hdrs.status) or nil
     if status ~= nil and status >= 200 and status < 300 then
         if options.raw then
@@ -1414,13 +1749,24 @@ _request = function(method, url, body, timeout, options)
         end
         return {} -- Return an empty table for successful but empty responses
     else
-        local err_msg = "API request failed. HTTP status: " .. tostring(status or (type(hdrs) == "table" and hdrs.status) or hdrs or 'unknown')
-        if result and #result > 0 then
-            local decoded_err = JSON:decode(result)
-            if type(decoded_err) == "table" and decoded_err.error then
-                err_msg = err_msg .. " - " .. decoded_err.error
+        local statusStr = httpStatusForLog(status, hdrs)
+        local err_msg
+        if status == nil then
+            -- No HTTP response: connection refused, timeout, DNS, or LrHttp returned error string in hdrs
+            if type(hdrs) == "string" and hdrs ~= "" then
+                err_msg = "API request failed (no response): " .. tostring(hdrs)
             else
-                err_msg = err_msg .. " Response: " .. result
+                err_msg = "API request failed (no response). Check backend URL and that the server is running. URL: " .. tostring(url and url:gsub("%?.*", "") or "nil")
+            end
+        else
+            err_msg = "API request failed. HTTP status: " .. statusStr
+            if result and #result > 0 then
+                local decoded_err = JSON:decode(result)
+                if type(decoded_err) == "table" and decoded_err.error then
+                    err_msg = err_msg .. " - " .. decoded_err.error
+                else
+                    err_msg = err_msg .. " Response: " .. result
+                end
             end
         end
         log:error(err_msg)
@@ -1496,6 +1842,10 @@ function SearchIndexAPI.getMissingPhotosFromIndex(taskOptions, lookupProgressSco
             tasks = tasks,
             regenerate_metadata = taskOptions.regenerateMetadata or false
         }
+        local checkCid = getCatalogId()
+        if checkCid then
+            body.catalog_id = checkCid
+        end
         local result, err = _request('POST', getBaseUrl() .. ENDPOINTS.CHECK_UNPROCESSED, body)
         if err then
             ErrorHandler.handleError("Failed to check unprocessed photos", err)
@@ -2005,8 +2355,9 @@ function SearchIndexAPI.isClipReady()
     local url = getBaseUrl() .. ENDPOINTS.CLIP_STATUS
     local res, err = _request('GET', url)
     if err then
-        log:error("isClipReady failed: " .. err)
-        return false, err
+        local errStr = (type(err) == "string") and err or "unknown"
+        log:error("isClipReady failed: " .. errStr)
+        return false, errStr
     end
     if res ~= nil then
         if res.clip == "ready" then

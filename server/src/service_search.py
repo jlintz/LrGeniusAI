@@ -92,9 +92,9 @@ def _normalize_search_sources(search_sources):
     return out
 
 
-def search_images(term, quality_sort, photo_ids_to_search, search_sources=None, *, vertex_project_id=None, vertex_location=None):
+def search_images(term, quality_sort, photo_ids_to_search, search_sources=None, *, vertex_project_id=None, vertex_location=None, catalog_id=None):
     sources = _normalize_search_sources(search_sources)
-    logger.info(f"Searching for '{term}' (quality_sort: {quality_sort}, scoped: {photo_ids_to_search is not None}, sources: {sources})")
+    logger.info(f"Searching for '{term}' (quality_sort: {quality_sort}, scoped: {photo_ids_to_search is not None}, catalog_id: {bool(catalog_id)}, sources: {sources})")
 
     sorted_semantic_results = []
     semantic_photo_ids = set()
@@ -112,14 +112,16 @@ def search_images(term, quality_sort, photo_ids_to_search, search_sources=None, 
             db_results = chroma_service.query_images(
                 query_embedding=normalized_embeddings,
                 n_results=300,
-                where_clause={"photo_id": {"$in": photo_ids_to_search}} if photo_ids_to_search else None
+                where_clause={"photo_id": {"$in": photo_ids_to_search}} if photo_ids_to_search else None,
+                catalog_id=catalog_id,
             )
             if photo_ids_to_search and (not db_results or not db_results.get("ids") or not db_results["ids"][0]):
                 # Legacy fallback for unmigrated metadata
                 db_results = chroma_service.query_images(
                     query_embedding=normalized_embeddings,
                     n_results=300,
-                    where_clause={"uuid": {"$in": photo_ids_to_search}}
+                    where_clause={"uuid": {"$in": photo_ids_to_search}},
+                    catalog_id=catalog_id,
                 )
 
             relevant_results = _filter_by_relevance(db_results)
@@ -145,12 +147,14 @@ def search_images(term, quality_sort, photo_ids_to_search, search_sources=None, 
                         query_embedding=query_emb,
                         n_results=300,
                         where_clause=vertex_where,
+                        catalog_id=catalog_id,
                     )
                     if photo_ids_to_search and (not vertex_results or not vertex_results.get("ids") or not vertex_results["ids"][0]):
                         vertex_results = chroma_service.query_vertex_images(
                             query_embedding=query_emb,
                             n_results=300,
                             where_clause={"uuid": {"$in": list(photo_ids_to_search)}},
+                            catalog_id=catalog_id,
                         )
                     vertex_semantic_results = _transform_vertex_results(vertex_results)
                     logger.info(f"Vertex AI semantic search returned {len(vertex_semantic_results)} results.")
@@ -169,6 +173,9 @@ def search_images(term, quality_sort, photo_ids_to_search, search_sources=None, 
         if photo_ids_to_search:
             target_ids = list(photo_ids_to_search)
             all_metadata_raw = chroma_service.collection.get(ids=target_ids, include=["metadatas"])
+        elif catalog_id:
+            target_ids = chroma_service.get_all_image_ids(catalog_id=catalog_id)
+            all_metadata_raw = chroma_service.collection.get(ids=target_ids, include=["metadatas"]) if target_ids else {"ids": [], "metadatas": []}
         else:
             all_metadata_raw = chroma_service.collection.get(include=["metadatas"])
 
@@ -264,3 +271,36 @@ def cull_images(photo_ids, phash_threshold, clip_threshold, time_delta, culling_
         },
         "groups": groups,
     }
+
+
+def find_similar_images(
+    photo_id,
+    scope_photo_ids=None,
+    max_results=100,
+    phash_max_hamming=10,
+    use_clip=True,
+    similarity_mode="phash",
+    catalog_id=None,
+):
+    """
+    Find indexed photos similar to the given photo.
+
+    similarity_mode: "phash" = near-duplicates by perceptual hash (optionally ranked by CLIP);
+                    "clip" = semantically similar by embedding (k-NN).
+    Returns list of {"photo_id", "phash_distance", "clip_distance"} sorted by similarity.
+    """
+    if similarity_mode == "clip":
+        return chroma_service.find_similar_to_photo_by_clip(
+            photo_id=photo_id,
+            scope_photo_ids=scope_photo_ids,
+            max_results=max_results,
+            catalog_id=catalog_id,
+        )
+    return chroma_service.find_similar_to_photo(
+        photo_id=photo_id,
+        scope_photo_ids=scope_photo_ids,
+        max_results=max_results,
+        phash_max_hamming=phash_max_hamming,
+        use_clip=use_clip,
+        catalog_id=catalog_id,
+    )

@@ -109,6 +109,11 @@ def _extract_options(data):
     options['vertex_project_id'] = data.get('vertex_project_id') or data.get('vertexProjectId')
     options['vertex_location'] = data.get('vertex_location') or data.get('vertexLocation')
 
+    # Cross-catalog: optional catalog_id for soft-state and filtered reads
+    options['catalog_id'] = data.get('catalog_id') or None
+    if options['catalog_id'] and isinstance(options['catalog_id'], str):
+        options['catalog_id'] = options['catalog_id'].strip() or None
+
     return options
 
 
@@ -304,7 +309,30 @@ def remove_image():
     except Exception as e:
         logger.error(f"Error removing image {photo_id}: {e}")
         return jsonify({"error": "photo_id not found or error during removal"}), 404
-        
+
+
+@index_bp.route('/remove/metadata', methods=['POST'])
+def remove_metadata():
+    """
+    Clear only AI-generated metadata (title, caption, keywords, alt_text, etc.) for a photo.
+    Keeps the document and embeddings so the photo remains in the index and searchable.
+    Use when the user discards a suggestion (e.g. in the review dialog) so they can regenerate later.
+    """
+    logger.info("Remove metadata request received")
+    body = request.json or {}
+    photo_id = body.get('photo_id') or body.get('uuid')
+    if not photo_id:
+        return jsonify({"error": "No photo_id provided"}), 400
+    try:
+        cleared = chroma_service.clear_image_metadata(photo_id)
+        if not cleared:
+            return jsonify({"error": "photo_id not found"}), 404
+        logger.info(f"Metadata cleared for photo_id {photo_id} (embeddings kept).")
+        return jsonify({"status": "ok", "photo_id": photo_id, "uuid": photo_id})
+    except Exception as e:
+        logger.error(f"Error clearing metadata for {photo_id}: {e}", exc_info=True)
+        return jsonify({"error": "photo_id not found or error during metadata clear"}), 404
+
 
 @index_bp.route('/get', methods=['POST'])
 def get_photo_data():
@@ -326,9 +354,10 @@ def get_photo_data():
     if not photo_id:
         return jsonify({"status": "error", "error": "No photo_id provided"}), 400
     
+    catalog_id = body.get('catalog_id')
     try:
-        # Get photo data from ChromaDB
-        photo_data = chroma_service.get_image(photo_id)
+        # Get photo data from ChromaDB (catalog-scoped when catalog_id provided)
+        photo_data = chroma_service.get_image(photo_id, catalog_id=catalog_id)
         logger.debug(f"Retrieved photo data for photo_id {photo_id}: {photo_data}")
         
         if not photo_data or not photo_data['ids']:
@@ -401,8 +430,9 @@ def get_ids():
     if has_embedding_param is not None:
         has_embedding = has_embedding_param.lower() == 'true'
         logger.info(f"Filtering IDs by has_embedding={has_embedding}")
-    
-    ids_data = chroma_service.get_all_image_ids(has_embedding=has_embedding)
+
+    catalog_id = request.args.get('catalog_id')
+    ids_data = chroma_service.get_all_image_ids(has_embedding=has_embedding, catalog_id=catalog_id)
     logger.info(f"Returning {len(ids_data)} image IDs")
     return jsonify(ids_data)
 
@@ -422,4 +452,49 @@ def check_unprocessed():
     needing = get_photo_ids_needing_processing(photo_ids, options)
     logger.info(f"check-unprocessed: {len(needing)} of {len(photo_ids)} photos need processing")
     return jsonify({"photo_ids": needing, "uuids": needing}), 200
+
+
+@index_bp.route('/sync/cleanup', methods=['POST'])
+def sync_cleanup():
+    """
+    Disassociate the given catalog_id from photos that are no longer in the provided photo_ids list.
+    Does not delete any documents; only updates catalog_ids metadata (soft state).
+    Body: { "catalog_id": "...", "photo_ids": ["id1", "id2", ...] }
+    """
+    data = request.get_json() or {}
+    catalog_id = data.get('catalog_id')
+    photo_ids = data.get('photo_ids')
+    if not catalog_id:
+        return jsonify({"error": "catalog_id is required"}), 400
+    if photo_ids is not None and not isinstance(photo_ids, list):
+        return jsonify({"error": "photo_ids must be a list or omit for empty"}), 400
+    try:
+        result = chroma_service.sync_cleanup(catalog_id, photo_ids or [])
+        return jsonify({"status": "ok", **result}), 200
+    except Exception as e:
+        logger.error(f"Sync cleanup failed: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@index_bp.route('/sync/claim', methods=['POST'])
+def sync_claim():
+    """
+    Claim backend photos for this catalog: add catalog_id to each photo's catalog_ids.
+    Body: { "catalog_id": "...", "photo_ids": ["id1", "id2", ...] }
+    Use for migration so existing (unclaimed) photos become visible to this catalog.
+    """
+    data = request.get_json() or {}
+    catalog_id = data.get("catalog_id")
+    photo_ids = data.get("photo_ids")
+    logger.info("sync/claim request: catalog_id=%s, photo_ids count=%s", catalog_id, len(photo_ids) if isinstance(photo_ids, list) else "n/a")
+    if not catalog_id:
+        return jsonify({"error": "catalog_id is required"}), 400
+    if not isinstance(photo_ids, list):
+        return jsonify({"error": "photo_ids must be a list"}), 400
+    try:
+        result = chroma_service.sync_claim(catalog_id, photo_ids)
+        return jsonify({"status": "ok", **result}), 200
+    except Exception as e:
+        logger.error(f"Sync claim failed: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
 
