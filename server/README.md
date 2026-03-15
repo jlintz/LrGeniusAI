@@ -178,3 +178,31 @@ In practice, backend identity should still be treated as best-effort and mostly 
 - ID generation had to fall back to partial file hashes because stable metadata IDs were unavailable
 
 For workflows that depend on strict cross-catalog identity, re-indexing and migration validation are still recommended when moving photos between catalogs or restoring older backend databases.
+
+---
+
+## Cross-catalog behavior (soft state, no deletion)
+
+When multiple Lightroom catalogs use the same remote backend, the server **never deletes** photo data. Instead it tracks which catalog “has” each photo.
+
+### Data model
+
+- Each catalog has a stable **catalog_id** (managed by the plugin).
+- Each photo in the backend has metadata **catalog_ids**: a list of catalog_ids that currently “have” that photo.
+- Indexing adds the requesting catalog’s id to **catalog_ids**. All read operations (search, get/ids, stats, check-unprocessed, get photo) accept an optional **catalog_id** and return only photos that include that catalog in **catalog_ids**.
+
+### Endpoints
+
+- **`POST /sync/cleanup`**  
+  Body: `{ "catalog_id": "...", "photo_ids": ["id1", "id2", ...] }`.  
+  Disassociates the given **catalog_id** from any backend photo that is **not** in **photo_ids** (photos removed from the Lightroom catalog). Does **not** delete documents; only updates metadata so other catalogs still see those photos.
+
+- **`POST /sync/claim`**  
+  Body: `{ "catalog_id": "...", "photo_ids": ["id1", "id2", ...] }`.  
+  Adds **catalog_id** to **catalog_ids** for each listed photo. Used to “claim” existing backend photos for a catalog (e.g. after upgrading to this behavior so previously indexed photos become visible to that catalog).
+
+### Behavior summary
+
+- **No physical deletion**: Removing a photo from a catalog only removes that catalog’s id from the photo’s **catalog_ids**.
+- **Catalog-scoped reads**: When **catalog_id** is sent, search, stats, get/ids, and related endpoints filter to photos that have that catalog in **catalog_ids**.
+- **Backward compatibility**: Requests without **catalog_id** are unchanged (no catalog filter).
