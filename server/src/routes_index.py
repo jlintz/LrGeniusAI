@@ -486,6 +486,7 @@ def sync_claim():
     data = request.get_json() or {}
     catalog_id = data.get("catalog_id")
     photo_ids = data.get("photo_ids")
+    logger.info("sync/claim request: catalog_id=%s, photo_ids count=%s", catalog_id, len(photo_ids) if isinstance(photo_ids, list) else "n/a")
     if not catalog_id:
         return jsonify({"error": "catalog_id is required"}), 400
     if not isinstance(photo_ids, list):
