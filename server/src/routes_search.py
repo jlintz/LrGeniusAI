@@ -110,6 +110,52 @@ def group_similar_route():
         return jsonify({"error": str(e)}), 500
 
 
+@search_bp.route('/find_similar', methods=['POST'])
+def find_similar_route():
+    """Find photos similar to a given photo by perceptual hash (and optionally CLIP)."""
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+
+    data = request.get_json()
+    photo_id = data.get('photo_id') or data.get('uuid')
+    if not photo_id or not str(photo_id).strip():
+        return jsonify({"error": "Missing or invalid 'photo_id' in request body"}), 400
+
+    scope_photo_ids = data.get('scope_photo_ids') or data.get('scope_uuids')
+    max_results = data.get('max_results', 100)
+    try:
+        max_results = max(1, min(int(max_results), 2000))
+    except (TypeError, ValueError):
+        max_results = 100
+
+    phash_max_hamming = data.get('phash_max_hamming', 10)
+    if phash_max_hamming != "auto":
+        try:
+            phash_max_hamming = max(0, min(int(phash_max_hamming), 64))
+        except (TypeError, ValueError):
+            phash_max_hamming = 10
+
+    use_clip = data.get('use_clip', True)
+    if not isinstance(use_clip, bool):
+        use_clip = str(use_clip).lower() in ("true", "1", "yes")
+
+    catalog_id = data.get('catalog_id') or request.args.get('catalog_id')
+
+    try:
+        results = service_search.find_similar_images(
+            photo_id=str(photo_id).strip(),
+            scope_photo_ids=scope_photo_ids,
+            max_results=max_results,
+            phash_max_hamming=phash_max_hamming,
+            use_clip=use_clip,
+            catalog_id=catalog_id,
+        )
+        return jsonify({"results": results})
+    except Exception as e:
+        logger.error("Error during find_similar: %s", str(e), exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 @search_bp.route('/cull', methods=['POST'])
 def cull_route():
     """High-level culling endpoint returning groups plus summary."""
