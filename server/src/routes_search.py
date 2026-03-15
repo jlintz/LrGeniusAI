@@ -141,6 +141,12 @@ def find_similar_route():
 
     catalog_id = data.get('catalog_id') or request.args.get('catalog_id')
 
+    logger.info(
+        "find_similar: photo_id=%s max_results=%s phash_max_hamming=%s use_clip=%s scope_photo_ids=%s catalog_id=%s",
+        photo_id, max_results, phash_max_hamming, use_clip,
+        len(scope_photo_ids) if scope_photo_ids else 0,
+        catalog_id or "(none)",
+    )
     try:
         results = service_search.find_similar_images(
             photo_id=str(photo_id).strip(),
@@ -150,6 +156,7 @@ def find_similar_route():
             use_clip=use_clip,
             catalog_id=catalog_id,
         )
+        logger.info("find_similar: returning %s results", len(results))
         return jsonify({"results": results})
     except Exception as e:
         logger.error("Error during find_similar: %s", str(e), exc_info=True)
