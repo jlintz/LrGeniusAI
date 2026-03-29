@@ -129,6 +129,15 @@ jobs:
               echo 'SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"'
               echo 'export KMP_DUPLICATE_LIB_OK=TRUE'
               echo 'export PYTHONPATH="$SCRIPT_DIR/app:${PYTHONPATH:-}"'
+              echo ''
+              echo '# macOS release ZIPs can lose execute bits and carry quarantine.'
+              echo 'if [ "$(uname -s)" = "Darwin" ]; then'
+              echo '  chmod +x "$SCRIPT_DIR/env/bin/python" "$SCRIPT_DIR/env/bin/python3" "$SCRIPT_DIR/env/bin/python3.12" 2>/dev/null || true'
+              echo '  if command -v xattr >/dev/null 2>&1; then'
+              echo '    xattr -dr com.apple.quarantine "$SCRIPT_DIR/env" 2>/dev/null || true'
+              echo '    xattr -d com.apple.quarantine "$SCRIPT_DIR" 2>/dev/null || true'
+              echo '  fi'
+              echo 'fi'
               echo 'exec "$SCRIPT_DIR/env/bin/python" "$SCRIPT_DIR/app/src/geniusai_server.py" "$@"'
             } > "$SERVER_DIR/lrgenius-server"
             chmod +x "$SERVER_DIR/lrgenius-server"
@@ -360,6 +369,12 @@ jobs:
           VERSION=${{ github.ref_name }}
           
           cd artifacts
+
+          # actions/download-artifact normalizes permissions, so restore macOS executable bits before zipping.
+          if [ -d "lrgenius-ai-macos-arm64" ]; then
+            chmod +x lrgenius-ai-macos-arm64/lrgenius-server/lrgenius-server || true
+            chmod +x lrgenius-ai-macos-arm64/lrgenius-server/env/bin/* || true
+          fi
           
           if [ -d "lrgenius-ai-windows-x64" ]; then
             cd lrgenius-ai-windows-x64
