@@ -166,9 +166,15 @@ jobs:
           START_TS=$(python -c "import time; print(time.time())")
 
           if [ "${{ matrix.os_name }}" == "windows" ]; then
-            DB_PATH_WIN=$(cygpath -m "$DB_PATH")
-            LAUNCHER_WIN=$(cygpath -m "$GITHUB_WORKSPACE/build/lrgenius-server/lrgenius-server.cmd")
-            cmd.exe //c "\"${LAUNCHER_WIN}\" --db-path \"${DB_PATH_WIN}\"" >"$SMOKE_STDOUT" 2>&1 &
+            DB_PATH_WIN=$(cygpath -w "$DB_PATH")
+            LAUNCHER_WIN=$(cygpath -w "$GITHUB_WORKSPACE/build/lrgenius-server/lrgenius-server.cmd")
+            SMOKE_LAUNCH_CMD="$DB_DIR/smoke-launch.cmd"
+            {
+              echo '@echo off'
+              echo "call \"$LAUNCHER_WIN\" --db-path \"$DB_PATH_WIN\""
+            } > "$SMOKE_LAUNCH_CMD"
+            SMOKE_LAUNCH_CMD_WIN=$(cygpath -w "$SMOKE_LAUNCH_CMD")
+            cmd.exe //c "$SMOKE_LAUNCH_CMD_WIN" >"$SMOKE_STDOUT" 2>&1 &
             BACKEND_PID=$!
           else
             "build/lrgenius-server/lrgenius-server" --db-path "$DB_PATH" >"$SMOKE_STDOUT" 2>&1 &
