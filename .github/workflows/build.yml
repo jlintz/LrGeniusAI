@@ -169,7 +169,8 @@ jobs:
             DB_PATH_WIN=$(cygpath -w "$DB_PATH")
             WORKSPACE_WIN=$(cygpath -w "$GITHUB_WORKSPACE")
             LAUNCHER_WIN="${WORKSPACE_WIN}\\build\\lrgenius-server\\lrgenius-server.cmd"
-            cmd.exe /c "start \"\" /b \"${LAUNCHER_WIN}\" --db-path \"${DB_PATH_WIN}\""
+            cmd.exe /c "\"${LAUNCHER_WIN}\" --db-path \"${DB_PATH_WIN}\"" >"$SMOKE_STDOUT" 2>&1 &
+            BACKEND_PID=$!
           else
             "build/lrgenius-server/lrgenius-server" --db-path "$DB_PATH" >"$SMOKE_STDOUT" 2>&1 &
             BACKEND_PID=$!
@@ -181,7 +182,7 @@ jobs:
               READY=1
               break
             fi
-            if [ "${{ matrix.os_name }}" != "windows" ] && [ -n "${BACKEND_PID:-}" ] && ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+            if [ -n "${BACKEND_PID:-}" ] && ! kill -0 "$BACKEND_PID" 2>/dev/null; then
               echo "Backend process exited early before /ping became ready."
               break
             fi
