@@ -93,7 +93,7 @@ jobs:
 
           # Pack the CI env into a relocatable runtime env.
           micromamba install -y -n geniusai_server conda-pack
-          micromamba run -n geniusai_server conda-pack -n geniusai_server -o "$SERVER_DIR/env.tar.gz"
+          micromamba run -n geniusai_server conda-pack -p "$MAMBA_ROOT_PREFIX/envs/geniusai_server" -o "$SERVER_DIR/env.tar.gz"
           mkdir -p "$SERVER_ENV_DIR"
           tar -xzf "$SERVER_DIR/env.tar.gz" -C "$SERVER_ENV_DIR"
           rm -f "$SERVER_DIR/env.tar.gz"
