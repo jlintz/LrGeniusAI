@@ -101,32 +101,13 @@ jobs:
           # modify conda-managed metadata.
           micromamba create -y -p "$SERVER_ENV_DIR" -f server/environment.yml
 
-          echo "Pruning non-runtime files from packaged environment..."
-          rm -rf "$SERVER_ENV_DIR/share/doc" "$SERVER_ENV_DIR/share/man"
-          python - <<'PY' "$SERVER_ENV_DIR"
-          import os
-          import shutil
-          import sys
-
-          env_dir = sys.argv[1]
-          prune_dirs = {"__pycache__", "tests", "test", "testing"}
-          prune_suffixes = (".pyc", ".pyo")
-
-          for root, dirs, files in os.walk(env_dir, topdown=True):
-              keep_dirs = []
-              for d in list(dirs):
-                  if d in prune_dirs:
-                      shutil.rmtree(os.path.join(root, d), ignore_errors=True)
-                  else:
-                      keep_dirs.append(d)
-              dirs[:] = keep_dirs
-              for name in files:
-                  if name.endswith(prune_suffixes):
-                      try:
-                          os.remove(os.path.join(root, name))
-                      except OSError:
-                          pass
-          PY
+          # Sanity check: backend import path expects torch.testing to exist.
+          if [ "${{ matrix.os_name }}" == "windows" ]; then
+            PY_EXE="$SERVER_ENV_DIR/python.exe"
+          else
+            PY_EXE="$SERVER_ENV_DIR/bin/python"
+          fi
+          "$PY_EXE" -c "import torch, torch.testing; print('torch ok', torch.__version__)"
 
           echo "Copying backend source files..."
           cp -r server/src "$SERVER_APP_DIR/"
