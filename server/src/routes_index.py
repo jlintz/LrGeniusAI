@@ -90,6 +90,46 @@ def _extract_options(data):
     if include_masks_val is None:
         include_masks_val = 'true'
     options['include_masks'] = str(include_masks_val).lower() == 'true'
+    adjust_wb_val = data.get('adjust_white_balance')
+    if adjust_wb_val is None:
+        adjust_wb_val = 'true'
+    options['adjust_white_balance'] = str(adjust_wb_val).lower() == 'true'
+    adjust_basic_tone_val = data.get('adjust_basic_tone')
+    if adjust_basic_tone_val is None:
+        adjust_basic_tone_val = 'true'
+    options['adjust_basic_tone'] = str(adjust_basic_tone_val).lower() == 'true'
+    adjust_presence_val = data.get('adjust_presence')
+    if adjust_presence_val is None:
+        adjust_presence_val = 'true'
+    options['adjust_presence'] = str(adjust_presence_val).lower() == 'true'
+    adjust_color_mix_val = data.get('adjust_color_mix')
+    if adjust_color_mix_val is None:
+        adjust_color_mix_val = 'true'
+    options['adjust_color_mix'] = str(adjust_color_mix_val).lower() == 'true'
+    do_color_grading_val = data.get('do_color_grading')
+    if do_color_grading_val is None:
+        do_color_grading_val = 'true'
+    options['do_color_grading'] = str(do_color_grading_val).lower() == 'true'
+    use_tone_curve_val = data.get('use_tone_curve')
+    if use_tone_curve_val is None:
+        use_tone_curve_val = 'true'
+    options['use_tone_curve'] = str(use_tone_curve_val).lower() == 'true'
+    use_point_curve_val = data.get('use_point_curve')
+    if use_point_curve_val is None:
+        use_point_curve_val = 'true'
+    options['use_point_curve'] = str(use_point_curve_val).lower() == 'true'
+    adjust_detail_val = data.get('adjust_detail')
+    if adjust_detail_val is None:
+        adjust_detail_val = 'true'
+    options['adjust_detail'] = str(adjust_detail_val).lower() == 'true'
+    adjust_effects_val = data.get('adjust_effects')
+    if adjust_effects_val is None:
+        adjust_effects_val = 'true'
+    options['adjust_effects'] = str(adjust_effects_val).lower() == 'true'
+    adjust_lens_corrections_val = data.get('adjust_lens_corrections')
+    if adjust_lens_corrections_val is None:
+        adjust_lens_corrections_val = 'true'
+    options['adjust_lens_corrections'] = str(adjust_lens_corrections_val).lower() == 'true'
     # Optional capture time from Lightroom catalog.
     # `date_time_unix` is a float seconds-since-epoch value; `date_time` is an
     # ISO/W3C string kept for backwards compatibility.
