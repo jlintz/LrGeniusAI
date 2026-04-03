@@ -134,6 +134,14 @@ def _extract_options(data):
     if adjust_effects_val is None:
         adjust_effects_val = 'true'
     options['adjust_effects'] = str(adjust_effects_val).lower() == 'true'
+    adjust_lens_corrections_val = data.get('adjust_lens_corrections')
+    if adjust_lens_corrections_val is None:
+        adjust_lens_corrections_val = 'true'
+    options['adjust_lens_corrections'] = str(adjust_lens_corrections_val).lower() == 'true'
+    allow_auto_crop_val = data.get('allow_auto_crop')
+    if allow_auto_crop_val is None:
+        allow_auto_crop_val = 'true'
+    options['allow_auto_crop'] = str(allow_auto_crop_val).lower() == 'true'
     # Optional capture time from Lightroom catalog.
     # `date_time_unix` is a float seconds-since-epoch value; `date_time` is an
     # ISO/W3C string kept for backwards compatibility.
