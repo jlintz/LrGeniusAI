@@ -86,6 +86,14 @@ def _extract_options(data):
     options['regenerate_metadata'] = str(reg_val).lower() == 'true'
     options['prompt'] = data.get('prompt')
     options['edit_intent'] = data.get('edit_intent')
+    try:
+        options['style_strength'] = float(data.get('style_strength', 0.5))
+    except (TypeError, ValueError):
+        options['style_strength'] = 0.5
+    if options['style_strength'] < 0.0:
+        options['style_strength'] = 0.0
+    if options['style_strength'] > 1.0:
+        options['style_strength'] = 1.0
     include_masks_val = data.get('include_masks')
     if include_masks_val is None:
         include_masks_val = 'true'
@@ -126,10 +134,6 @@ def _extract_options(data):
     if adjust_effects_val is None:
         adjust_effects_val = 'true'
     options['adjust_effects'] = str(adjust_effects_val).lower() == 'true'
-    adjust_lens_corrections_val = data.get('adjust_lens_corrections')
-    if adjust_lens_corrections_val is None:
-        adjust_lens_corrections_val = 'true'
-    options['adjust_lens_corrections'] = str(adjust_lens_corrections_val).lower() == 'true'
     # Optional capture time from Lightroom catalog.
     # `date_time_unix` is a float seconds-since-epoch value; `date_time` is an
     # ISO/W3C string kept for backwards compatibility.
