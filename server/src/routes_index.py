@@ -85,6 +85,11 @@ def _extract_options(data):
         reg_val = data.get('regenerateMetadata', 'true')
     options['regenerate_metadata'] = str(reg_val).lower() == 'true'
     options['prompt'] = data.get('prompt')
+    options['edit_intent'] = data.get('edit_intent')
+    include_masks_val = data.get('include_masks')
+    if include_masks_val is None:
+        include_masks_val = 'true'
+    options['include_masks'] = str(include_masks_val).lower() == 'true'
     # Optional capture time from Lightroom catalog.
     # `date_time_unix` is a float seconds-since-epoch value; `date_time` is an
     # ISO/W3C string kept for backwards compatibility.
@@ -372,6 +377,8 @@ def get_photo_data():
         
         # Separate user-facing metadata from internal indexing fields
         metadata_fields = {}
+        edit_recipe = None
+        edit_warnings = []
         
         # User metadata field names (from metadata generation)
         metadata_keys = {
@@ -399,6 +406,18 @@ def get_photo_data():
                         metadata_fields[key] = []
                 else:
                     metadata_fields[key] = value
+            elif key == 'edit_recipe' and isinstance(value, str) and value:
+                try:
+                    edit_recipe = json.loads(value)
+                except (json.JSONDecodeError, ValueError):
+                    logger.warning(f"Error decoding edit_recipe JSON for {photo_id}")
+            elif key == 'edit_warnings' and isinstance(value, str) and value:
+                try:
+                    decoded_warnings = json.loads(value)
+                    if isinstance(decoded_warnings, list):
+                        edit_warnings = decoded_warnings
+                except (json.JSONDecodeError, ValueError):
+                    logger.warning(f"Error decoding edit_warnings JSON for {photo_id}")
         
         logger.info(f"Retrieved data for photo {photo_id}: {len(metadata_fields)} metadata fields")
         
@@ -407,6 +426,11 @@ def get_photo_data():
             "photo_id": photo_id,
             "uuid": photo_id,
             "metadata": metadata_fields,
+            "edit": edit_recipe,
+            "edit_summary": metadata_dict.get("edit_summary"),
+            "edit_warnings": edit_warnings,
+            "edit_model": metadata_dict.get("edit_model"),
+            "edit_rundate": metadata_dict.get("edit_run_date"),
             "ai_model": ai_model,
             "ai_rundate": ai_rundate
         })
