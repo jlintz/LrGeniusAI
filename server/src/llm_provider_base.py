@@ -8,6 +8,7 @@ import io
 
 # Import prompts from config
 from config import METADATA_GENERATION_SYSTEM_PROMPT
+from edit_recipe import OPENAI_EDIT_RECIPE_SCHEMA, normalize_edit_recipe
 
 @dataclass
 class MetadataGenerationRequest:
@@ -81,6 +82,62 @@ class MetadataGenerationResponse:
     error: Optional[str] = None
 
 
+@dataclass
+class EditGenerationRequest:
+    """Request structure for Lightroom edit recipe generation."""
+    image_data: bytes
+    uuid: str
+
+    provider: str
+    model: str
+    api_key: Optional[str]
+
+    language: str
+    temperature: float
+    max_tokens: Optional[int]
+
+    system_prompt: Optional[str]
+    user_prompt: Optional[str]
+
+    submit_gps: bool
+    submit_keywords: bool
+    submit_folder_names: bool
+
+    existing_keywords: Optional[List[str]]
+    gps_coordinates: Optional[Dict[str, float]]
+    folder_names: Optional[str]
+    user_context: Optional[str]
+    date_time: Optional[str]
+    edit_intent: Optional[str] = None
+    style_strength: float = 0.5
+    include_masks: bool = True
+    adjust_white_balance: bool = True
+    adjust_basic_tone: bool = True
+    adjust_presence: bool = True
+    adjust_color_mix: bool = True
+    do_color_grading: bool = True
+    use_tone_curve: bool = True
+    use_point_curve: bool = True
+    adjust_detail: bool = True
+    adjust_effects: bool = True
+    adjust_lens_corrections: bool = True
+    allow_auto_crop: bool = True
+    composition_mode: str = "subtle"
+    ollama_base_url: Optional[str] = None
+    lmstudio_base_url: Optional[str] = None
+
+
+@dataclass
+class EditGenerationResponse:
+    """Structured Lightroom edit recipe response."""
+    uuid: str
+    success: bool
+    recipe: Optional[Dict[str, Any]] = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    error: Optional[str] = None
+
+
 class LLMProviderBase(ABC):
     """
     Abstract base class for all LLM providers.
@@ -117,6 +174,13 @@ class LLMProviderBase(ABC):
         
         Returns:
             True if provider can be used, False otherwise
+        """
+        pass
+
+    @abstractmethod
+    def generate_edit_recipe(self, request: EditGenerationRequest) -> EditGenerationResponse:
+        """
+        Generate a Lightroom edit recipe for a single image.
         """
         pass
     
@@ -235,6 +299,127 @@ class LLMProviderBase(ABC):
         if context_additions:
             base_prompt += "\n\n" + "\n".join(context_additions)
         
+        return base_prompt
+
+    def _prepare_edit_system_prompt(self, request: EditGenerationRequest) -> str:
+        if request.system_prompt:
+            return request.system_prompt
+
+        return (
+            "You are a senior Lightroom Classic retoucher producing high-end, client-ready edits. "
+            "Return only a structured Lightroom edit recipe that strictly matches the provided JSON schema. "
+            "Never output prose instructions, markdown, or fields not present in the schema. "
+            "Prioritize natural color science, tonal separation, and believable micro-contrast unless an explicit stylized intent is given. "
+            "Use the minimum number of controls needed for a strong result; avoid noisy over-adjustment. "
+            "When local edits are useful, use only supported mask kinds: subject, sky, background."
+        )
+
+    def _prepare_edit_user_prompt(self, request: EditGenerationRequest) -> str:
+        if request.user_prompt:
+            base_prompt = request.user_prompt
+        else:
+            base_prompt = (
+                "Analyze the uploaded photo and return a Lightroom edit recipe.\n"
+                "* Add a concise summary of the intended look\n"
+                "* Put broad corrections in `global`\n"
+                "* Put local corrections in `masks` only when they produce clear benefit\n"
+                "* Keep the result natural and premium unless the context explicitly asks for stylization\n"
+                "* Do not include unchanged controls"
+            )
+
+        base_prompt += (
+            "\n\nEdit recipe rules:\n"
+            "* Return only numeric Lightroom-friendly adjustments\n"
+            "* Build edits in this order: white balance and exposure foundation -> tonal shaping -> color refinement -> detail/effects\n"
+            "* For white balance use global `temperature` and `tint` (or `white_balance.temperature` / `white_balance.tint`)\n"
+            "* Use global controls first; add masks only when global edits cannot solve the problem cleanly\n"
+            "* Use masks only for subject, sky, or background\n"
+            "* Keep saturation and clarity moderate; avoid brittle or crunchy output\n"
+            "* Prefer highlight recovery and shadow shaping before aggressive contrast\n"
+            "* If a curve-shaped tone response is needed (e.g. subtle S-curve, matte blacks, gentle roll-off), prefer `tone_curve.point_curve` and/or `tone_curve.extended_point_curve` over faking it with only contrast sliders\n"
+            "* When using point curves, provide valid point pairs per channel in ascending x order and keep endpoints anchored near black/white unless a deliberate fade is requested\n"
+            "* Use advanced controls (vignette sub-controls, sharpen detail/masking, noise detail, color NR detail/smoothness) only when clearly justified by image content\n"
+            "* Use `lens_corrections` and `crop` only when they clearly improve the result\n"
+            "* Add warnings when something seems uncertain or unsupported\n"
+        )
+
+        if not request.include_masks:
+            base_prompt += "* Do not return any masks; keep all edits global\n"
+        if not request.adjust_white_balance:
+            base_prompt += "* Do not adjust white balance (`temperature`, `tint`, `white_balance`)\n"
+        if not request.adjust_basic_tone:
+            base_prompt += "* Do not adjust global basic tone controls (`exposure`, `contrast`, `highlights`, `shadows`, `whites`, `blacks`)\n"
+        if not request.adjust_presence:
+            base_prompt += "* Do not adjust presence controls (`texture`, `clarity`, `dehaze`)\n"
+        if not request.adjust_color_mix:
+            base_prompt += "* Do not adjust color mix controls (`vibrance`, `saturation`, `hsl`)\n"
+        if not request.do_color_grading:
+            base_prompt += "* Do not use `color_grading`\n"
+        if not request.use_tone_curve:
+            base_prompt += "* Do not use `tone_curve` (neither parametric nor point curve)\n"
+        elif not request.use_point_curve:
+            base_prompt += "* Do not use `tone_curve.point_curve` or `tone_curve.extended_point_curve`; use only parametric tone curve sliders if needed\n"
+        if not request.adjust_detail:
+            base_prompt += "* Do not adjust detail controls (sharpening/noise reduction)\n"
+        if not request.adjust_effects:
+            base_prompt += "* Do not adjust effects controls (vignette/grain)\n"
+        if not request.adjust_lens_corrections:
+            base_prompt += "* Do not use `lens_corrections`\n"
+        if not request.allow_auto_crop:
+            base_prompt += "* Do not use `crop`\n"
+        else:
+            composition_mode = str(request.composition_mode or "subtle").lower()
+            if composition_mode == "none":
+                base_prompt += "* Do not use `crop`\n"
+            elif composition_mode == "subtle":
+                base_prompt += "* If using `crop`, keep it subtle: preserve overall framing and avoid aggressive trims\n"
+            elif composition_mode == "aggressive":
+                base_prompt += "* Crop may be assertive when composition clearly improves; keep key subjects and avoid awkward cutoffs\n"
+
+        context_additions: List[str] = []
+        if request.edit_intent:
+            context_additions.append(f"Requested editing intent: {request.edit_intent}")
+        strength = request.style_strength
+        if strength is None:
+            strength = 0.5
+        try:
+            strength = float(strength)
+        except (TypeError, ValueError):
+            strength = 0.5
+        if strength < 0.0:
+            strength = 0.0
+        if strength > 1.0:
+            strength = 1.0
+        if strength <= 0.25:
+            context_additions.append("Style strength: very subtle (minimal slider movement, preserve original character).")
+        elif strength <= 0.5:
+            context_additions.append("Style strength: subtle to moderate (clean refinement, avoid strong stylization).")
+        elif strength <= 0.75:
+            context_additions.append("Style strength: moderate to strong (noticeable look while staying plausible).")
+        else:
+            context_additions.append("Style strength: strong (bold look allowed, but avoid clipping and artifacts).")
+        if request.user_context:
+            context_additions.append(f"Per-photo instructions: {request.user_context}")
+        if request.submit_keywords and request.existing_keywords:
+            keywords_str = ", ".join(str(k).strip() for k in request.existing_keywords if str(k).strip())
+            if keywords_str:
+                context_additions.append(f"Existing keywords: {keywords_str}")
+        if request.submit_folder_names and request.folder_names:
+            context_additions.append(f"Folder context: {request.folder_names}")
+        if request.submit_gps and isinstance(request.gps_coordinates, dict):
+            lat = request.gps_coordinates.get("latitude")
+            lon = request.gps_coordinates.get("longitude")
+            if lat is not None and lon is not None:
+                context_additions.append(f"Photo coordinates: {lat}, {lon}")
+        if request.date_time:
+            context_additions.append(f"Capture time: {request.date_time}")
+        if request.language:
+            context_additions.append(
+                f"Write `summary` and `warnings` in {request.language}, but keep field names exactly as specified by the schema."
+            )
+
+        if context_additions:
+            base_prompt += "\n\n" + "\n".join(context_additions)
         return base_prompt
     
     def _build_nested_keyword_schema(self, categories: Dict[str, Any], bilingual: bool = False) -> Dict[str, Any]:
@@ -423,6 +608,12 @@ class LLMProviderBase(ABC):
 
         normalized_leaf = self._normalize_keyword_leaf(value)
         return normalized_leaf
+
+    def _prepare_edit_response_structure(self) -> Dict[str, Any]:
+        return OPENAI_EDIT_RECIPE_SCHEMA
+
+    def _normalize_edit_recipe(self, value: Any) -> Dict[str, Any]:
+        return normalize_edit_recipe(value)
     
     def _image_to_base64(self, image_data: bytes) -> str:
         """

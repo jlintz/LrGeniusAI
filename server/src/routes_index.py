@@ -85,6 +85,67 @@ def _extract_options(data):
         reg_val = data.get('regenerateMetadata', 'true')
     options['regenerate_metadata'] = str(reg_val).lower() == 'true'
     options['prompt'] = data.get('prompt')
+    options['edit_intent'] = data.get('edit_intent')
+    try:
+        options['style_strength'] = float(data.get('style_strength', 0.5))
+    except (TypeError, ValueError):
+        options['style_strength'] = 0.5
+    if options['style_strength'] < 0.0:
+        options['style_strength'] = 0.0
+    if options['style_strength'] > 1.0:
+        options['style_strength'] = 1.0
+    include_masks_val = data.get('include_masks')
+    if include_masks_val is None:
+        include_masks_val = 'true'
+    options['include_masks'] = str(include_masks_val).lower() == 'true'
+    adjust_wb_val = data.get('adjust_white_balance')
+    if adjust_wb_val is None:
+        adjust_wb_val = 'true'
+    options['adjust_white_balance'] = str(adjust_wb_val).lower() == 'true'
+    adjust_basic_tone_val = data.get('adjust_basic_tone')
+    if adjust_basic_tone_val is None:
+        adjust_basic_tone_val = 'true'
+    options['adjust_basic_tone'] = str(adjust_basic_tone_val).lower() == 'true'
+    adjust_presence_val = data.get('adjust_presence')
+    if adjust_presence_val is None:
+        adjust_presence_val = 'true'
+    options['adjust_presence'] = str(adjust_presence_val).lower() == 'true'
+    adjust_color_mix_val = data.get('adjust_color_mix')
+    if adjust_color_mix_val is None:
+        adjust_color_mix_val = 'true'
+    options['adjust_color_mix'] = str(adjust_color_mix_val).lower() == 'true'
+    do_color_grading_val = data.get('do_color_grading')
+    if do_color_grading_val is None:
+        do_color_grading_val = 'true'
+    options['do_color_grading'] = str(do_color_grading_val).lower() == 'true'
+    use_tone_curve_val = data.get('use_tone_curve')
+    if use_tone_curve_val is None:
+        use_tone_curve_val = 'true'
+    options['use_tone_curve'] = str(use_tone_curve_val).lower() == 'true'
+    use_point_curve_val = data.get('use_point_curve')
+    if use_point_curve_val is None:
+        use_point_curve_val = 'true'
+    options['use_point_curve'] = str(use_point_curve_val).lower() == 'true'
+    adjust_detail_val = data.get('adjust_detail')
+    if adjust_detail_val is None:
+        adjust_detail_val = 'true'
+    options['adjust_detail'] = str(adjust_detail_val).lower() == 'true'
+    adjust_effects_val = data.get('adjust_effects')
+    if adjust_effects_val is None:
+        adjust_effects_val = 'true'
+    options['adjust_effects'] = str(adjust_effects_val).lower() == 'true'
+    adjust_lens_corrections_val = data.get('adjust_lens_corrections')
+    if adjust_lens_corrections_val is None:
+        adjust_lens_corrections_val = 'true'
+    options['adjust_lens_corrections'] = str(adjust_lens_corrections_val).lower() == 'true'
+    allow_auto_crop_val = data.get('allow_auto_crop')
+    if allow_auto_crop_val is None:
+        allow_auto_crop_val = 'true'
+    options['allow_auto_crop'] = str(allow_auto_crop_val).lower() == 'true'
+    composition_mode = str(data.get('composition_mode', 'subtle')).lower().strip()
+    if composition_mode not in ('none', 'subtle', 'aggressive'):
+        composition_mode = 'subtle'
+    options['composition_mode'] = composition_mode
     # Optional capture time from Lightroom catalog.
     # `date_time_unix` is a float seconds-since-epoch value; `date_time` is an
     # ISO/W3C string kept for backwards compatibility.
@@ -372,6 +433,8 @@ def get_photo_data():
         
         # Separate user-facing metadata from internal indexing fields
         metadata_fields = {}
+        edit_recipe = None
+        edit_warnings = []
         
         # User metadata field names (from metadata generation)
         metadata_keys = {
@@ -399,6 +462,18 @@ def get_photo_data():
                         metadata_fields[key] = []
                 else:
                     metadata_fields[key] = value
+            elif key == 'edit_recipe' and isinstance(value, str) and value:
+                try:
+                    edit_recipe = json.loads(value)
+                except (json.JSONDecodeError, ValueError):
+                    logger.warning(f"Error decoding edit_recipe JSON for {photo_id}")
+            elif key == 'edit_warnings' and isinstance(value, str) and value:
+                try:
+                    decoded_warnings = json.loads(value)
+                    if isinstance(decoded_warnings, list):
+                        edit_warnings = decoded_warnings
+                except (json.JSONDecodeError, ValueError):
+                    logger.warning(f"Error decoding edit_warnings JSON for {photo_id}")
         
         logger.info(f"Retrieved data for photo {photo_id}: {len(metadata_fields)} metadata fields")
         
@@ -407,6 +482,11 @@ def get_photo_data():
             "photo_id": photo_id,
             "uuid": photo_id,
             "metadata": metadata_fields,
+            "edit": edit_recipe,
+            "edit_summary": metadata_dict.get("edit_summary"),
+            "edit_warnings": edit_warnings,
+            "edit_model": metadata_dict.get("edit_model"),
+            "edit_rundate": metadata_dict.get("edit_run_date"),
             "ai_model": ai_model,
             "ai_rundate": ai_rundate
         })

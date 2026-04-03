@@ -108,6 +108,8 @@ jobs:
             PY_EXE="$SERVER_ENV_DIR/bin/python"
           fi
           "$PY_EXE" -c "import torch, torch.testing; print('torch ok', torch.__version__)"
+          "$PY_EXE" -m pip check
+          "$PY_EXE" -c "import sys; sys.path.insert(0, 'server'); import torch, torchvision, timm, open_clip; cfg = open_clip.get_model_config('ViT-SO400M-16-SigLIP2-384'); assert cfg and cfg.get('vision_cfg', {}).get('timm_model_name'); print('ml import contract ok', torch.__version__, torchvision.__version__, timm.__version__)"
 
           echo "Copying backend source files..."
           cp -r server/src "$SERVER_APP_DIR/"
@@ -129,6 +131,17 @@ jobs:
               echo 'SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"'
               echo 'export KMP_DUPLICATE_LIB_OK=TRUE'
               echo 'export PYTHONPATH="$SCRIPT_DIR/app:${PYTHONPATH:-}"'
+              echo ''
+              echo '# macOS release ZIPs can lose execute bits and carry quarantine.'
+              echo 'if [ "$(uname -s)" = "Darwin" ]; then'
+              echo '  chmod +x "$SCRIPT_DIR/env/bin/python" "$SCRIPT_DIR/env/bin/python3" "$SCRIPT_DIR/env/bin/python3.12" 2>/dev/null || true'
+              echo '  if command -v xattr >/dev/null 2>&1; then'
+              echo '    xattr -dr com.apple.quarantine "$SCRIPT_DIR/env" 2>/dev/null || true'
+              echo '    xattr -d com.apple.quarantine "$SCRIPT_DIR" 2>/dev/null || true'
+              echo '  fi'
+              echo '  # Relocated envs lose absolute rpaths; help dyld find torch libs.'
+              echo '  export DYLD_LIBRARY_PATH="$SCRIPT_DIR/env/lib/python3.12/site-packages/torch/lib:$SCRIPT_DIR/env/lib:${DYLD_LIBRARY_PATH:-}"'
+              echo 'fi'
               echo 'exec "$SCRIPT_DIR/env/bin/python" "$SCRIPT_DIR/app/src/geniusai_server.py" "$@"'
             } > "$SERVER_DIR/lrgenius-server"
             chmod +x "$SERVER_DIR/lrgenius-server"
@@ -219,6 +232,24 @@ jobs:
           echo "Measured cold start to /ping: ${COLD_START_SECONDS}s"
 
           curl -sf -X POST "http://127.0.0.1:19819/shutdown" || true
+
+      - name: Relocation import test
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          RELOCATED="$RUNNER_TEMP/relocated-server"
+          cp -a build/lrgenius-server "$RELOCATED"
+          if [ "${{ matrix.os_name }}" == "windows" ]; then
+            PY="$RELOCATED/env/python.exe"
+          else
+            PY="$RELOCATED/env/bin/python"
+            if [ "$(uname -s)" = "Darwin" ]; then
+              export DYLD_LIBRARY_PATH="$RELOCATED/env/lib/python3.12/site-packages/torch/lib:$RELOCATED/env/lib:${DYLD_LIBRARY_PATH:-}"
+            fi
+          fi
+          export PYTHONPATH="$RELOCATED/app:${PYTHONPATH:-}"
+          "$PY" -c "import torch, torchvision; print('relocation ok', torch.__version__, torchvision.__version__)"
+          rm -rf "$RELOCATED"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
@@ -360,6 +391,12 @@ jobs:
           VERSION=${{ github.ref_name }}
           
           cd artifacts
+
+          # actions/download-artifact normalizes permissions, so restore macOS executable bits before zipping.
+          if [ -d "lrgenius-ai-macos-arm64" ]; then
+            chmod +x lrgenius-ai-macos-arm64/lrgenius-server/lrgenius-server || true
+            chmod +x lrgenius-ai-macos-arm64/lrgenius-server/env/bin/* || true
+          fi
           
           if [ -d "lrgenius-ai-windows-x64" ]; then
             cd lrgenius-ai-windows-x64
