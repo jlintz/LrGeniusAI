@@ -96,7 +96,7 @@ jobs:
           # runner-specific /Library/Frameworks/Python.framework paths.
           if [ "${{ matrix.os_name }}" == "macos" ]; then
             uv python install 3.12
-            UV_MANAGED_PY="$(uv python find 3.12)"
+            UV_MANAGED_PY="$(uv python find --managed-python --resolve-links 3.12)"
             echo "Using uv-managed Python for relocatable venv: $UV_MANAGED_PY"
             uv venv --python "$UV_MANAGED_PY" --relocatable "$SERVER_ENV_DIR"
           else
@@ -110,16 +110,35 @@ jobs:
           fi
 
           # macOS standalone python can depend on libpython via @rpath.
-          # Ensure the dylib is bundled inside env/lib for portable artifacts.
+          # Bundle the dylib into env/lib when required.
           if [ "${{ matrix.os_name }}" == "macos" ]; then
-            PY_DYLIB="$("$PY_EXE" -c "import os, sysconfig; print(os.path.join(sysconfig.get_config_var('LIBDIR') or '', sysconfig.get_config_var('LDLIBRARY') or ''))")"
-            if [ -z "${PY_DYLIB}" ] || [ ! -f "${PY_DYLIB}" ]; then
-              echo "Error: could not locate libpython dylib from interpreter metadata."
-              exit 1
+            LIBPY_REF="$(otool -L "$PY_EXE" | awk '/libpython[0-9.]+\.dylib/{print $1; exit}')"
+            if [[ -n "${LIBPY_REF}" && "${LIBPY_REF}" == @rpath/* ]]; then
+              LIBPY_NAME="${LIBPY_REF#@rpath/}"
+              PY_DYLIB="$("$PY_EXE" -c "import os, sys, sysconfig; c=[]; ldlib=sysconfig.get_config_var('LDLIBRARY') or ''; libdir=sysconfig.get_config_var('LIBDIR') or ''; libpl=sysconfig.get_config_var('LIBPL') or ''; [c.append(os.path.join(d, ldlib)) for d in (libdir, libpl) if d and ldlib]; c.append(os.path.join(sys.base_prefix, 'lib', ldlib)) if ldlib else None; [print(p) for p in c if p and os.path.isfile(p)]")"
+              PY_DYLIB="$(printf '%s\n' "${PY_DYLIB}" | awk 'NF{print; exit}')"
+              if [ -z "${PY_DYLIB}" ] || [ ! -f "${PY_DYLIB}" ]; then
+                for CAND in \
+                  "$(dirname "$(dirname "$UV_MANAGED_PY")")/lib/${LIBPY_NAME}" \
+                  "$("$PY_EXE" -c 'import sys; print(sys.base_prefix)')/lib/${LIBPY_NAME}"
+                do
+                  if [ -f "${CAND}" ]; then
+                    PY_DYLIB="${CAND}"
+                    break
+                  fi
+                done
+              fi
+              if [ -z "${PY_DYLIB}" ] || [ ! -f "${PY_DYLIB}" ]; then
+                echo "Error: ${LIBPY_NAME} required by ${PY_EXE}, but no source dylib was found."
+                otool -L "$PY_EXE"
+                exit 1
+              fi
+              mkdir -p "$SERVER_ENV_DIR/lib"
+              cp -f "${PY_DYLIB}" "$SERVER_ENV_DIR/lib/"
+              echo "Bundled libpython dylib: $(basename "${PY_DYLIB}")"
+            else
+              echo "No @rpath libpython dependency detected; skipping dylib bundle."
             fi
-            mkdir -p "$SERVER_ENV_DIR/lib"
-            cp -f "${PY_DYLIB}" "$SERVER_ENV_DIR/lib/"
-            echo "Bundled libpython dylib: $(basename "${PY_DYLIB}")"
           fi
 
           # Fast-fail on macOS before expensive installs if the relocatable
