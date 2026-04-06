@@ -92,8 +92,9 @@ jobs:
           SERVER_ENV_DIR="$SERVER_DIR/env"
           mkdir -p "$SERVER_APP_DIR"
 
-          # On macOS, force uv-managed Python so packaged env does not link against
-          # runner-specific /Library/Frameworks/Python.framework paths.
+          # On macOS and Windows, bundle the full uv-managed interpreter so the artifact does
+          # not reference runner-local installs (macOS: Framework Python; Windows: Actions
+          # toolcache / pyvenv.cfg home paths).
           if [ "${{ matrix.os_name }}" == "macos" ]; then
             uv python install 3.12
             UV_MANAGED_PY="$(uv python find --managed-python --resolve-links 3.12)"
@@ -101,12 +102,35 @@ jobs:
             UV_MANAGED_ROOT="$(dirname "$(dirname "$UV_MANAGED_PY")")"
             mkdir -p "$SERVER_ENV_DIR"
             cp -a "$UV_MANAGED_ROOT/." "$SERVER_ENV_DIR/"
+          elif [ "${{ matrix.os_name }}" == "windows" ]; then
+            uv python install 3.12
+            UV_MANAGED_PY="$(uv python find --managed-python --resolve-links 3.12)"
+            echo "Using uv-managed Python runtime: $UV_MANAGED_PY"
+            case "$UV_MANAGED_PY" in
+              */Scripts/python.exe)
+                UV_MANAGED_ROOT="$(dirname "$(dirname "$UV_MANAGED_PY")")"
+                ;;
+              *)
+                UV_MANAGED_ROOT="$(dirname "$UV_MANAGED_PY")"
+                ;;
+            esac
+            mkdir -p "$SERVER_ENV_DIR"
+            cp -a "$UV_MANAGED_ROOT/." "$SERVER_ENV_DIR/"
+            if [ -f "$SERVER_ENV_DIR/pyvenv.cfg" ]; then
+              echo "Error: Windows bundle unexpectedly contains pyvenv.cfg (expected standalone interpreter copy, not a venv)"
+              cat "$SERVER_ENV_DIR/pyvenv.cfg"
+              exit 1
+            fi
           else
             uv venv --python 3.12 --relocatable "$SERVER_ENV_DIR"
           fi
 
           if [ "${{ matrix.os_name }}" == "windows" ]; then
-            PY_EXE="$SERVER_ENV_DIR/Scripts/python.exe"
+            if [ -f "$SERVER_ENV_DIR/Scripts/python.exe" ]; then
+              PY_EXE="$SERVER_ENV_DIR/Scripts/python.exe"
+            else
+              PY_EXE="$SERVER_ENV_DIR/python.exe"
+            fi
           elif [ "${{ matrix.os_name }}" == "macos" ]; then
             PY_EXE="$SERVER_ENV_DIR/bin/python3.12"
           else
@@ -174,13 +198,18 @@ jobs:
           cp -r server/src "$SERVER_APP_DIR/"
 
           if [ "${{ matrix.os_name }}" == "windows" ]; then
+            if [ -f "$SERVER_ENV_DIR/Scripts/python.exe" ]; then
+              WIN_PY_REL='env\Scripts\python.exe'
+            else
+              WIN_PY_REL='env\python.exe'
+            fi
             {
               echo '@echo off'
               echo 'setlocal'
               echo 'set "SCRIPT_DIR=%~dp0"'
               echo 'set "KMP_DUPLICATE_LIB_OK=TRUE"'
               echo 'set "PYTHONPATH=%SCRIPT_DIR%app;%PYTHONPATH%"'
-              echo 'call "%SCRIPT_DIR%env\Scripts\python.exe" "%SCRIPT_DIR%app\src\geniusai_server.py" %*'
+              echo "call \"%SCRIPT_DIR%${WIN_PY_REL}\" \"%SCRIPT_DIR%app\src\geniusai_server.py\" %*"
             } > "$SERVER_DIR/lrgenius-server.cmd"
           else
             {
@@ -334,7 +363,11 @@ jobs:
           echo "Measured cold start to /ping: ${COLD_START_SECONDS}s"
 
           if [ "${{ matrix.os_name }}" == "windows" ]; then
-            TEST_PY="$GITHUB_WORKSPACE/build/lrgenius-server/env/Scripts/python.exe"
+            if [ -f "$GITHUB_WORKSPACE/build/lrgenius-server/env/Scripts/python.exe" ]; then
+              TEST_PY="$GITHUB_WORKSPACE/build/lrgenius-server/env/Scripts/python.exe"
+            else
+              TEST_PY="$GITHUB_WORKSPACE/build/lrgenius-server/env/python.exe"
+            fi
           else
             TEST_PY="$GITHUB_WORKSPACE/build/lrgenius-server/env/bin/python"
           fi
@@ -353,7 +386,11 @@ jobs:
           RELOCATED="$RUNNER_TEMP/relocated-server"
           cp -a build/lrgenius-server "$RELOCATED"
           if [ "${{ matrix.os_name }}" == "windows" ]; then
-            PY="$RELOCATED/env/Scripts/python.exe"
+            if [ -f "$RELOCATED/env/Scripts/python.exe" ]; then
+              PY="$RELOCATED/env/Scripts/python.exe"
+            else
+              PY="$RELOCATED/env/python.exe"
+            fi
           else
             PY="$RELOCATED/env/bin/python"
           fi
