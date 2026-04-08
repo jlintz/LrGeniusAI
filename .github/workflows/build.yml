@@ -199,7 +199,12 @@ jobs:
           "$PY_EXE" -c "import torch, torchvision; from torchvision.ops import nms; b=torch.tensor([[0.,0.,1.,1.],[0.,0.,2.,2.]], dtype=torch.float32); s=torch.tensor([0.9,0.8], dtype=torch.float32); print('torchvision nms op ok', nms(b, s, 0.5).tolist())"
 
           echo "Running unit tests with pytest..."
-          PYTHONPATH="server:server/src" "$PY_EXE" -m pytest server/test/ -v
+          if [ "${{ matrix.os_name }}" == "windows" ]; then
+            export PYTHONPATH="server;server/src"
+          else
+            export PYTHONPATH="server:server/src"
+          fi
+          "$PY_EXE" -m pytest server/test/ -v
 
           echo "Copying backend source files..."
           cp -r server/src "$SERVER_APP_DIR/"
