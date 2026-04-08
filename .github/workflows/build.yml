@@ -177,8 +177,10 @@ jobs:
           # same as macOS, Windows needs --break-system-packages to install deps into the tree.
           if [ "${{ matrix.os_name }}" == "macos" ] || [ "${{ matrix.os_name }}" == "windows" ]; then
             uv pip install --python "$PY_EXE" --break-system-packages -r server/requirements-desktop.txt
+            uv pip install --python "$PY_EXE" --break-system-packages pytest pytest-mock
           else
             uv pip install --python "$PY_EXE" -r server/requirements-desktop.txt
+            uv pip install --python "$PY_EXE" pytest pytest-mock
           fi
 
           # Windows ships CPU-only (config.py hardcodes TORCH_DEVICE="cpu").
@@ -195,6 +197,9 @@ jobs:
           uv pip check --python "$PY_EXE"
           "$PY_EXE" -c "import torch, torchvision, timm, open_clip; cfg = open_clip.get_model_config('ViT-SO400M-16-SigLIP2-384'); assert cfg and cfg.get('vision_cfg', {}).get('timm_model_name'); print('ml import contract ok', torch.__version__, torchvision.__version__, timm.__version__)"
           "$PY_EXE" -c "import torch, torchvision; from torchvision.ops import nms; b=torch.tensor([[0.,0.,1.,1.],[0.,0.,2.,2.]], dtype=torch.float32); s=torch.tensor([0.9,0.8], dtype=torch.float32); print('torchvision nms op ok', nms(b, s, 0.5).tolist())"
+
+          echo "Running unit tests with pytest..."
+          PYTHONPATH="server:server/src" "$PY_EXE" -m pytest server/test/ -v
 
           echo "Copying backend source files..."
           cp -r server/src "$SERVER_APP_DIR/"
