@@ -235,7 +235,7 @@ def index_images_batch():
         logger.info("No valid images to process in the batch.")
         return jsonify({"status": "processed", "success_count": 0, "failure_count": batch_size}), 200
 
-    success_count, failure_count = process_image_task(
+    success_count, failure_count, error_messages = process_image_task(
         image_triplets,
         options=options
     )
@@ -244,7 +244,11 @@ def index_images_batch():
     
     if success_count == 0:
         logger.warning("No images were successfully processed in the batch.")
-        return jsonify({"error": "No images were successfully processed"}), 500
+        err_msg = "No images were successfully processed"
+        if error_messages:
+            unique_errs = list(dict.fromkeys(error_messages))
+            err_msg += ": " + " | ".join(unique_errs[:5])
+        return jsonify({"error": err_msg}), 500
     
     return jsonify({"status": "processed", "success_count": success_count, "failure_count": failure_count}), 200
 
@@ -271,7 +275,7 @@ def index_images_batch_base64():
 
     options = _extract_options(data)
 
-    success_count, failure_count = process_image_task(
+    success_count, failure_count, error_messages = process_image_task(
         [(base64.b64decode(image.encode('ascii')), photo_id, filename)],
         options=options
     )
@@ -280,7 +284,11 @@ def index_images_batch_base64():
 
     if success_count == 0:
         logger.warning("No images were successfully processed in the batch.")
-        return jsonify({"error": "No images were successfully processed"}), 500
+        err_msg = "No images were successfully processed"
+        if error_messages:
+            unique_errs = list(dict.fromkeys(error_messages))
+            err_msg += ": " + " | ".join(unique_errs[:5])
+        return jsonify({"error": err_msg}), 500
         
     return jsonify({"status": "processed", "success_count": success_count, "failure_count": failure_count}), 200
 
@@ -342,7 +350,7 @@ def index_images_batch_by_reference():
         logger.info("No valid image paths to process in the batch.")
         return jsonify({"status": "processed", "success_count": 0, "failure_count": read_failures}), 200
 
-    success_count, processing_failures = process_image_task(
+    success_count, processing_failures, error_messages = process_image_task(
         image_triplets,
         options=options
     )
@@ -352,7 +360,11 @@ def index_images_batch_by_reference():
 
     if success_count == 0:
         logger.warning("No images were successfully processed in the batch.")
-        return jsonify({"error": "No images were successfully processed"}), 500
+        err_msg = "No images were successfully processed"
+        if error_messages:
+            unique_errs = list(dict.fromkeys(error_messages))
+            err_msg += ": " + " | ".join(unique_errs[:5])
+        return jsonify({"error": err_msg}), 500
     
     return jsonify({"status": "processed", "success_count": success_count, "failure_count": total_failures}), 200
 
