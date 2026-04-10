@@ -235,10 +235,7 @@ def index_images_batch():
         logger.info("No valid images to process in the batch.")
         return jsonify({"status": "processed", "success_count": 0, "failure_count": batch_size}), 200
 
-    success_count, failure_count, error_messages = process_image_task(
-        image_triplets,
-        options=options
-    )
+    success_count, failure_count, error_messages, warnings = service_index.process_image_task(image_triplets, options)
     
     logger.info(f"Batch processing complete. Success: {success_count}, Failures: {failure_count}.")
     
@@ -250,7 +247,13 @@ def index_images_batch():
             err_msg += ": " + " | ".join(unique_errs[:5])
         return jsonify({"error": err_msg}), 500
     
-    return jsonify({"status": "processed", "success_count": success_count, "failure_count": failure_count}), 200
+    return jsonify({
+        "status": "processed",
+        "success_count": success_count,
+        "failure_count": failure_count,
+        "error_messages": error_messages,
+        "warnings": warnings
+    }), 200
 
 @index_bp.route('/index_base64', methods=['POST'])
 def index_images_batch_base64():
@@ -275,7 +278,7 @@ def index_images_batch_base64():
 
     options = _extract_options(data)
 
-    success_count, failure_count, error_messages = process_image_task(
+    success_count, failure_count, error_messages, warnings = process_image_task(
         [(base64.b64decode(image.encode('ascii')), photo_id, filename)],
         options=options
     )
@@ -290,7 +293,13 @@ def index_images_batch_base64():
             err_msg += ": " + " | ".join(unique_errs[:5])
         return jsonify({"error": err_msg}), 500
         
-    return jsonify({"status": "processed", "success_count": success_count, "failure_count": failure_count}), 200
+    return jsonify({
+        "status": "processed",
+        "success_count": success_count,
+        "failure_count": failure_count,
+        "error_messages": error_messages,
+        "warnings": warnings or []
+    }), 200
 
 
 @index_bp.route('/index_by_reference', methods=['POST'])
