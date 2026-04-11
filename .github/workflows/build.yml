@@ -328,8 +328,10 @@ jobs:
           echo "Building Windows .exe installer with Inno Setup..."
           # Inno Setup is pre-installed on windows-latest
           ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
-          MSYS_NO_PATHCONV=1 "$ISCC" /DAppVersion="$VERSION" installers/windows/setup.iss
-          mv installers/windows/Output/*.exe .
+          MSYS_NO_PATHCONV=1 "$ISCC" /DAppVersion="$VERSION" /O"installers/windows/Output" installers/windows/setup.iss
+          # Match the installer even if the OutputDir logic in the .iss varies
+          find . -name "*.exe" -path "*/Output/*" -exec mv {} . \; -quit || mv installers/windows/Output/*.exe .
+
 
       - name: Smoke test packaged backend and log cold start
         shell: bash
