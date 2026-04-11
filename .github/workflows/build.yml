@@ -643,6 +643,11 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
@@ -699,27 +704,11 @@ jobs:
 
       - name: Prepare release notes
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${{ github.ref_name }}"
-          TAG="${VERSION}"
-          # Auto-generierte Release Notes von GitHub (falls möglich)
-          gh api repos/${{ github.repository }}/releases/generate-notes \
-            -f tag_name="${TAG}" \
-            -q '.body' > release_notes.md 2>/dev/null || echo -n "" > release_notes.md
-          # Hinweise zu Backend-Startverhalten und Docker-Asset anhängen
-          cat >> release_notes.md << 'NOTES'
-
-          ## Desktop backend startup
-          - The bundled backend starts automatically from Lightroom.
-          - The previous SmartScreen/Gatekeeper manual unblock steps are no longer required for this package.
-          - Optional manual troubleshooting start:
-            - Windows: `lrgenius-server/lrgenius-server.cmd`
-            - macOS: `lrgenius-server/lrgenius-server`
-
-          ## Docker backend
-          - Users running the backend via Docker can use the `LrGeniusAI-plugin-docker-backend-<version>.zip` asset.
-          NOTES
+          pip install google-genai
+          python3 scripts/generate_release_notes.py
 
       - name: Create release
         uses: softprops/action-gh-release@v2
