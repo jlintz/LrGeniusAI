@@ -235,7 +235,7 @@ def index_images_batch():
         logger.info("No valid images to process in the batch.")
         return jsonify({"status": "processed", "success_count": 0, "failure_count": batch_size}), 200
 
-    success_count, failure_count, error_messages, warnings = service_index.process_image_task(image_triplets, options)
+    success_count, failure_count, error_messages, warnings = process_image_task(image_triplets, options)
     
     logger.info(f"Batch processing complete. Success: {success_count}, Failures: {failure_count}.")
     
