@@ -5,6 +5,3 @@ models/
 # Legacy location before moving docker-compose.yml to repo root
 server/gcloud/
 docker-compose.yml
-entities.json
-.gitignore
-mempalace.yaml
