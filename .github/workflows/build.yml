@@ -216,9 +216,9 @@ jobs:
 
           if [ "${{ matrix.os_name }}" == "windows" ]; then
             if [ -f "$SERVER_ENV_DIR/Scripts/python.exe" ]; then
-              WIN_PY_REL='env\Scripts\python.exe'
+              WIN_PYW_REL='env\Scripts\pythonw.exe'
             else
-              WIN_PY_REL='env\python.exe'
+              WIN_PYW_REL='env\pythonw.exe'
             fi
             {
               echo '@echo off'
@@ -226,7 +226,8 @@ jobs:
               echo 'set "SCRIPT_DIR=%~dp0"'
               echo 'set "KMP_DUPLICATE_LIB_OK=TRUE"'
               echo 'set "PYTHONPATH=%SCRIPT_DIR%app;%PYTHONPATH%"'
-              echo "call \"%SCRIPT_DIR%${WIN_PY_REL}\" \"%SCRIPT_DIR%app\src\geniusai_server.py\" %*"
+              echo 'rem Use start /b with pythonw.exe to run invisibly and allow the batch script to exit immediately.'
+              echo "start \"\" /b \"%SCRIPT_DIR%${WIN_PYW_REL}\" \"%SCRIPT_DIR%app\src\geniusai_server.py\" %*"
             } > "$SERVER_DIR/lrgenius-server.cmd"
           else
             {
@@ -352,11 +353,17 @@ jobs:
 
           if [ "${{ matrix.os_name }}" == "windows" ]; then
             DB_PATH_WIN=$(cygpath -w "$DB_PATH")
-            LAUNCHER_WIN=$(cygpath -w "$GITHUB_WORKSPACE/build/lrgenius-server/lrgenius-server.cmd")
+            # Use console python.exe directly for smoke test so it remains synchronous and trackable
+            if [ -f "build/lrgenius-server/env/Scripts/python.exe" ]; then
+              PY_EXE_WIN=$(cygpath -w "$GITHUB_WORKSPACE/build/lrgenius-server/env/Scripts/python.exe")
+            else
+              PY_EXE_WIN=$(cygpath -w "$GITHUB_WORKSPACE/build/lrgenius-server/env/python.exe")
+            fi
+            SERVER_PY_WIN=$(cygpath -w "$GITHUB_WORKSPACE/build/lrgenius-server/app/src/geniusai_server.py")
             SMOKE_LAUNCH_CMD="$DB_DIR/smoke-launch.cmd"
             {
               echo '@echo off'
-              echo "call \"$LAUNCHER_WIN\" --db-path \"$DB_PATH_WIN\""
+              echo "\"$PY_EXE_WIN\" \"$SERVER_PY_WIN\" --db-path \"$DB_PATH_WIN\""
             } > "$SMOKE_LAUNCH_CMD"
             SMOKE_LAUNCH_CMD_WIN=$(cygpath -w "$SMOKE_LAUNCH_CMD")
             cmd.exe //c "$SMOKE_LAUNCH_CMD_WIN" >"$SMOKE_STDOUT" 2>&1 &
