@@ -730,19 +730,6 @@ jobs:
           pip install google-genai
           python3 scripts/generate_release_notes.py
 
-      - name: Commit and push CHANGELOG.md
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add CHANGELOG.md
-          git commit -m "docs: update CHANGELOG.md for ${{ github.ref_name }} [skip ci]" || echo "No changes to commit"
-          git fetch origin main
-          git rebase --autostash origin/main
-          git push origin HEAD:main
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -755,6 +742,6 @@ jobs:
             artifacts/lrgenius-ai-windows-x64/*.exe
           draft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
-          generate_release_notes: false
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
