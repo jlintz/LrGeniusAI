@@ -258,7 +258,6 @@ class LMStudioProvider(LLMProviderBase):
                 uuid=request.uuid, success=False, error=str(e)
             )
 
-    @override
     def list_available_models(self) -> list[str]:
         """
         List available LM Studio models using the lmstudio-python library.

@@ -545,7 +545,6 @@ class GeminiProvider(LLMProviderBase):
 
         return text
 
-    @override
     def list_available_models(self) -> list[str]:
         """
         List available Gemini models.
