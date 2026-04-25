@@ -430,7 +430,7 @@ class AnalysisService:
             try:
                 # Re-use the CLIP embedding of the current photo from the main collection
                 # (best-effort: skip if not available).
-                import service_chroma as chroma_service
+                from . import chroma as chroma_service
 
                 existing = chroma_service.get_image(uuid)
                 embedding = None

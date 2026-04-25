@@ -129,8 +129,8 @@ def style_edit():
             result.confidence,
             photo_id,
         )
-        from service_metadata import get_analysis_service
-        import service_training as training_service
+        from services.metadata import get_analysis_service
+        from services import training as training_service
 
         # Inject training examples as few-shot context in the LLM request
         if clip_embedding is not None:
