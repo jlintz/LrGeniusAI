@@ -4,7 +4,7 @@ Gemini Provider for metadata generation using Google Generative AI API
 
 import json
 import time
-from typing import Any, override
+from typing import Any
 from llm_provider_base import (
     LLMProviderBase,
     EditGenerationRequest,
@@ -22,7 +22,6 @@ class GeminiProvider(LLMProviderBase):
     Supports Gemini 2.0, Gemini 1.5 Pro, and other vision-capable models.
     """
 
-    @override
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self.api_key = config.get("api_key")

@@ -3,7 +3,7 @@ Ollama Provider for metadata generation using the official Ollama Python SDK
 """
 
 import json
-from typing import Any, override
+from typing import Any
 
 try:
     from ollama import Client  # type: ignore
@@ -26,7 +26,6 @@ class OllamaProvider(LLMProviderBase):
     Uses Ollama's chat completion API with vision models.
     """
 
-    @override
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self.base_url = config.get("base_url", OLLAMA_BASE_URL)
