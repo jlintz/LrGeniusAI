@@ -542,7 +542,7 @@ class GeminiProvider(LLMProviderBase):
 
         return text
 
-    def list_available_models(self) -> list:
+    def list_available_models(self) -> list[str]:
         """
         List available Gemini models.
 

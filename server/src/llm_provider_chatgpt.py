@@ -336,7 +336,7 @@ class ChatGPTProvider(LLMProviderBase):
 
         return schema
 
-    def list_available_models(self) -> list:
+    def list_available_models(self) -> list[str]:
         """
         List available OpenAI models.
 

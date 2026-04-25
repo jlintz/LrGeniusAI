@@ -199,7 +199,7 @@ class LLMProviderBase(ABC):
         pass
 
     @abstractmethod
-    def list_available_models(self) -> list:
+    def list_available_models(self) -> list[str]:
         """
         List all available models for this provider.
 
@@ -669,9 +669,7 @@ class LLMProviderBase(ABC):
 
         return schema
 
-    def _normalize_keyword_leaf(
-        self, value: Any
-    ) -> str | dict[str, Any] | None:
+    def _normalize_keyword_leaf(self, value: Any) -> str | dict[str, Any] | None:
         if isinstance(value, str):
             keyword = value.strip()
             return keyword or None

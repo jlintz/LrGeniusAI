@@ -234,7 +234,7 @@ class OllamaProvider(LLMProviderBase):
                 uuid=request.uuid, success=False, error=str(e)
             )
 
-    def list_available_models(self) -> list:
+    def list_available_models(self) -> list[str]:
         """
         List available Ollama models using Ollama API.
 
