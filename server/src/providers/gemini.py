@@ -5,7 +5,7 @@ Gemini Provider for metadata generation using Google Generative AI API
 import json
 import time
 from typing import Any, override
-from llm_provider_base import (
+from .base import (
     LLMProviderBase,
     EditGenerationRequest,
     EditGenerationResponse,

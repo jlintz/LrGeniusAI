@@ -5,17 +5,17 @@ Uses lazy loading - providers are only initialized when needed.
 """
 
 from typing import Any
-from llm_provider_base import (
+from providers.base import (
     LLMProviderBase,
     EditGenerationRequest,
     EditGenerationResponse,
     MetadataGenerationRequest,
     MetadataGenerationResponse,
 )
-from llm_provider_ollama import OllamaProvider
-from llm_provider_lmstudio import LMStudioProvider
-from llm_provider_chatgpt import ChatGPTProvider
-from llm_provider_gemini import GeminiProvider
+from providers.ollama import OllamaProvider
+from providers.lmstudio import LMStudioProvider
+from providers.chatgpt import ChatGPTProvider
+from providers.gemini import GeminiProvider
 from utils.edit_recipe import filter_edit_recipe_by_controls
 from config import logger, DEFAULT_METADATA_PROVIDER, DEFAULT_METADATA_LANGUAGE
 import service_training as training_service

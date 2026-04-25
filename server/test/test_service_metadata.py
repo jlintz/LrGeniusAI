@@ -3,7 +3,7 @@ import io
 import pytest
 from PIL import Image
 
-from llm_provider_base import MetadataGenerationResponse
+from providers.base import MetadataGenerationResponse
 
 
 def _jpeg_bytes(color=(120, 0, 0)):
