@@ -99,7 +99,7 @@ Entry point: `server/src/geniusai_server.py` — registers Flask Blueprints and 
 - `service_face.py` / `service_persons.py` — InsightFace detection & clustering
 - `service_db.py` — SQLite metadata store
 - `service_index.py` / `service_search.py` — photo indexing & semantic search
-- `service_edit.py` / `service_style_engine.py` — develop edit recipe generation
+- `edit_recipe.py` / `service_style_engine.py` — develop edit recipe normalization & generation
 
 **LLM providers** (`llm_provider_*.py`): `chatgpt`, `gemini`, `lmstudio`, `ollama`
 
