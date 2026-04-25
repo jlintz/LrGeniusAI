@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, final
 from dataclasses import dataclass
 import base64
 from PIL import Image
@@ -670,6 +670,7 @@ class LLMProviderBase(ABC):
 
         return schema
 
+    @final
     def _normalize_keyword_leaf(self, value: Any) -> str | dict[str, Any] | None:
         if isinstance(value, str):
             keyword = value.strip()
@@ -734,6 +735,7 @@ class LLMProviderBase(ABC):
     def _prepare_edit_response_structure(self) -> dict[str, Any]:
         return OPENAI_EDIT_RECIPE_SCHEMA
 
+    @final
     def _normalize_edit_recipe(self, value: Any) -> dict[str, Any]:
         return normalize_edit_recipe(value)
 
