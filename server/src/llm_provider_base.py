@@ -465,9 +465,9 @@ class LLMProviderBase(ABC):
         context_additions: list[str] = []
         if request.edit_intent:
             context_additions.append(f"Requested editing intent: {request.edit_intent}")
+
         strength = request.style_strength
-        if strength is None:
-            strength = 0.5
+
         try:
             strength = float(strength)
         except (TypeError, ValueError):
