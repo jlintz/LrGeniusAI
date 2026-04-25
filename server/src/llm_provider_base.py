@@ -161,8 +161,8 @@ class LLMProviderBase(ABC):
         Args:
             config: Provider-specific configuration dictionary
         """
-        self.config = config
-        self.provider_name = self.__class__.__name__
+        self.config: dict[str, Any] = config
+        self.provider_name: str = self.__class__.__name__
 
     @abstractmethod
     def generate_metadata(
