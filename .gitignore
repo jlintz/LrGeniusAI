@@ -34,3 +34,4 @@ models/
 server/gcloud/
 docker-compose.yml
 .gemini/
+.claude/
