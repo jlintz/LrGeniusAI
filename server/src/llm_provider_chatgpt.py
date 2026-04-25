@@ -3,7 +3,7 @@ ChatGPT/OpenAI Provider for metadata generation using OpenAI API
 """
 
 import json
-from typing import Any
+from typing import Any, override
 from llm_provider_base import (
     LLMProviderBase,
     EditGenerationRequest,
@@ -20,6 +20,7 @@ class ChatGPTProvider(LLMProviderBase):
     Supports GPT-4o, GPT-4-turbo, and other vision-capable models.
     """
 
+    @override
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self.api_key = config.get("api_key")
@@ -339,6 +340,7 @@ class ChatGPTProvider(LLMProviderBase):
 
         return schema
 
+    @override
     def list_available_models(self) -> list[str]:
         """
         List available OpenAI models.

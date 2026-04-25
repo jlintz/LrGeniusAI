@@ -4,7 +4,7 @@ LM Studio Provider for metadata generation using the lmstudio-python library
 
 import json
 import lmstudio as lms
-from typing import Any
+from typing import Any, override
 from llm_provider_base import (
     LLMProviderBase,
     EditGenerationRequest,
@@ -21,6 +21,7 @@ class LMStudioProvider(LLMProviderBase):
     Uses the lmstudio-python library.
     """
 
+    @override
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self.host: str = config.get("base_url", LMSTUDIO_HOST)
@@ -258,6 +259,7 @@ class LMStudioProvider(LLMProviderBase):
                 uuid=request.uuid, success=False, error=str(e)
             )
 
+    @override
     def list_available_models(self) -> list[str]:
         """
         List available LM Studio models using the lmstudio-python library.
