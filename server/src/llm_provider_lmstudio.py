@@ -24,8 +24,8 @@ class LMStudioProvider(LLMProviderBase):
     @override
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
-        self.host = config.get("base_url", LMSTUDIO_HOST)
-        self.timeout = config.get("timeout", 720)
+        self.host: str = config.get("base_url", LMSTUDIO_HOST)
+        self.timeout: int = config.get("timeout", 720)
         # lmstudio-python's synchronous API defaults to timing out after ~60s of
         # inactivity when waiting for a response/stream event. Wire our configured
         # timeout through so metadata generation can run longer (e.g. 720s).
