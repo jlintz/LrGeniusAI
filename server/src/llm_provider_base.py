@@ -309,8 +309,8 @@ class LLMProviderBase(ABC):
             ).strip() or "English"
             if secondary_language.lower() != request.language.lower():
                 context_additions.append(
-                    "For keywords only, return each keyword as an object with fields "
-                    "`name` (in "
+                    "For keywords only, return each keyword as an object with fields \
+                    `name` (in "
                     + request.language
                     + ") and `synonyms` (array in "
                     + secondary_language
@@ -318,8 +318,8 @@ class LLMProviderBase(ABC):
                 )
             else:
                 context_additions.append(
-                    "For keywords, return each keyword as an object with fields `name` and `synonyms`. "
-                    "Use `synonyms` only for meaningful alternate terms and avoid duplicates."
+                    "For keywords, return each keyword as an object with fields `name` and `synonyms`. \
+                    Use `synonyms` only for meaningful alternate terms and avoid duplicates."
                 )
 
         # Append context if any
