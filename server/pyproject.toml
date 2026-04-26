@@ -37,3 +37,8 @@ dev = [
     "pytest>=8.0.0",
     "pytest-mock>=3.12.0",
 ]
+
+[tool.ruff.lint]
+# E741: ambiguous variable name (single-letter `l`, `I`, `O`). Allowed for
+# numerical / scientific code where these names are conventional.
+extend-ignore = ["E741"]
